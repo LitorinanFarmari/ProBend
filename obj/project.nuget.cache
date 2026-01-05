@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "U4wUIdpsk/ATVexT+DRj4NB7z354DHaB8tAB6O6a2NqLlfP6rLVfiMvvyvPOwOA2Kih4ot0mOZLS8zK6N41b9g==",
+  "success": true,
+  "projectFilePath": "C:\\Users\\ossiv\\Documents\\code\\BusbarCAD\\BusbarCAD.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\ossiv\\.nuget\\packages\\newtonsoft.json\\13.0.4\\newtonsoft.json.13.0.4.nupkg.sha512"
+  ],
+  "logs": []
+}
