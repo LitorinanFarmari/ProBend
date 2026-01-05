@@ -20,6 +20,17 @@ public class SegmentInfo
 }
 
 /// <summary>
+/// Saved busbar with name and segments
+/// </summary>
+public class SavedBusbar
+{
+    public string Name { get; set; } = "";
+    public List<Point2D> Points { get; set; } = new List<Point2D>();
+    public List<SegmentInfo> Segments { get; set; } = new List<SegmentInfo>();
+    public List<Shape> Shapes { get; set; } = new List<Shape>(); // Visual shapes on canvas
+}
+
+/// <summary>
 /// Interaction logic for MainWindow.xaml
 /// </summary>
 public partial class MainWindow : Window
@@ -29,6 +40,8 @@ public partial class MainWindow : Window
     private List<Point2D> _currentPoints = new List<Point2D>();
     private Polygon? _previewPolygon = null;
     private List<SegmentInfo> _currentSegments = new List<SegmentInfo>();
+    private List<SavedBusbar> _savedBusbars = new List<SavedBusbar>();
+    private List<Shape> _currentShapes = new List<Shape>(); // Track shapes being drawn
     private TransformGroup _canvasTransform;
     private ScaleTransform _scaleTransform;
     private TranslateTransform _translateTransform;
@@ -380,6 +393,7 @@ public partial class MainWindow : Window
         _isDrawing = true;
         _currentPoints.Clear();
         _currentSegments.Clear();
+        _currentShapes.Clear();
         UpdateSegmentList();
         txtBusbarName.Text = "a";
         txtInstructions.Visibility = Visibility.Collapsed;
@@ -412,46 +426,67 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Create busbar from points
-        var activeLayer = _currentProject.GetActiveLayer();
-        if (activeLayer == null) return;
+        // Get the busbar name from the textbox
+        string busbarName = string.IsNullOrWhiteSpace(txtBusbarName.Text) ? "a" : txtBusbarName.Text;
 
-        int busbarNumber = activeLayer.Busbars.Count + 1;
-        var busbar = new Busbar($"Bar {busbarNumber}");
-
-        // Create segments and bends
-        for (int i = 0; i < _currentPoints.Count - 1; i++)
+        // Create a SavedBusbar object
+        var savedBusbar = new SavedBusbar
         {
-            var start = _currentPoints[i];
-            var end = _currentPoints[i + 1];
-            double length = start.DistanceTo(end);
+            Name = busbarName,
+            Points = new List<Point2D>(_currentPoints),
+            Segments = new List<SegmentInfo>(_currentSegments),
+            Shapes = new List<Shape>(_currentShapes)
+        };
 
-            var segment = new Segment(start, end, length);
-            busbar.AddSegment(segment);
+        // Add to the saved busbars list
+        _savedBusbars.Add(savedBusbar);
 
-            // Add bend if not the last segment
-            if (i < _currentPoints.Count - 2)
+        // Update the left panel ListBox
+        lstBusbars.Items.Add(busbarName);
+
+        // Create busbar from points for the project model
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer != null)
+        {
+            int busbarNumber = activeLayer.Busbars.Count + 1;
+            var busbar = new Busbar(busbarName);
+
+            // Create segments and bends
+            for (int i = 0; i < _currentPoints.Count - 1; i++)
             {
-                // Calculate bend angle
-                double angle = CalculateBendAngle(i);
-                var bend = new Bend(end, angle, _currentProject.MaterialSettings.BendToolRadius);
-                busbar.AddBend(bend);
+                var start = _currentPoints[i];
+                var end = _currentPoints[i + 1];
+                double length = start.DistanceTo(end);
+
+                var segment = new Segment(start, end, length);
+                busbar.AddSegment(segment);
+
+                // Add bend if not the last segment
+                if (i < _currentPoints.Count - 2)
+                {
+                    // Calculate bend angle
+                    double angle = CalculateBendAngle(i);
+                    var bend = new Bend(end, angle, _currentProject.MaterialSettings.BendToolRadius);
+                    busbar.AddBend(bend);
+                }
             }
+
+            // Calculate flat length
+            BendCalculator.CalculateFlatLength(busbar, _currentProject.MaterialSettings);
+
+            // Validate
+            ValidationEngine.ValidateBusbar(busbar);
+
+            activeLayer.AddBusbar(busbar);
         }
-
-        // Calculate flat length
-        BendCalculator.CalculateFlatLength(busbar, _currentProject.MaterialSettings);
-
-        // Validate
-        ValidationEngine.ValidateBusbar(busbar);
-
-        activeLayer.AddBusbar(busbar);
 
         _isDrawing = false;
         _currentPoints.Clear();
+        _currentSegments.Clear();
+        _currentShapes.Clear();
 
         UpdateUI();
-        UpdateStatusBar($"Busbar created: {busbar.Name}, Flat length: {busbar.FlatLength:F2}mm");
+        UpdateStatusBar($"Busbar '{busbarName}' created and saved");
     }
 
     private double CalculateBendAngle(int segmentIndex)
@@ -918,6 +953,12 @@ public partial class MainWindow : Window
         };
 
         drawingCanvas.Children.Add(polygon);
+
+        // Track shape if we're currently drawing
+        if (_isDrawing)
+        {
+            _currentShapes.Add(polygon);
+        }
     }
 
     private void RedrawCanvas()
@@ -981,6 +1022,21 @@ public partial class MainWindow : Window
 
     private void Busbar_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        // Future: Highlight selected busbar on canvas
+        if (lstBusbars.SelectedIndex < 0 || lstBusbars.SelectedIndex >= _savedBusbars.Count)
+        {
+            return;
+        }
+
+        // Get the selected busbar
+        var selectedBusbar = _savedBusbars[lstBusbars.SelectedIndex];
+
+        // Display its name in the textbox
+        txtBusbarName.Text = selectedBusbar.Name;
+
+        // Display its segments in the right panel DataGrid
+        dgSegments.ItemsSource = null;
+        dgSegments.ItemsSource = selectedBusbar.Segments;
+
+        UpdateStatusBar($"Selected busbar: {selectedBusbar.Name} ({selectedBusbar.Segments.Count} segments)");
     }
 }
