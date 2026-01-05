@@ -470,22 +470,8 @@ public partial class MainWindow : Window
         // Get the busbar name from the textbox
         string busbarName = string.IsNullOrWhiteSpace(txtBusbarName.Text) ? "a" : txtBusbarName.Text;
 
-        // Create a SavedBusbar object
-        var savedBusbar = new SavedBusbar
-        {
-            Name = busbarName,
-            Points = new List<Point2D>(_currentPoints),
-            Segments = new List<SegmentInfo>(_currentSegments),
-            Shapes = new List<Shape>(_currentShapes)
-        };
-
-        // Add to the saved busbars list
-        _savedBusbars.Add(savedBusbar);
-
-        // Update the left panel ListBox
-        lstBusbars.Items.Add(busbarName);
-
-        // Create busbar from points for the project model
+        // Make sure the busbar is saved (it should already be from SaveOrUpdateCurrentBusbar)
+        // But we need to create the project model busbar
         var activeLayer = _currentProject.GetActiveLayer();
         if (activeLayer != null)
         {
