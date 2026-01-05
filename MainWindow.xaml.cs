@@ -11,6 +11,15 @@ using Microsoft.Win32;
 namespace BusbarCAD;
 
 /// <summary>
+/// Segment information for display in the DataGrid
+/// </summary>
+public class SegmentInfo
+{
+    public string Angle { get; set; } = "";
+    public string Length { get; set; } = "";
+}
+
+/// <summary>
 /// Interaction logic for MainWindow.xaml
 /// </summary>
 public partial class MainWindow : Window
@@ -19,6 +28,7 @@ public partial class MainWindow : Window
     private bool _isDrawing = false;
     private List<Point2D> _currentPoints = new List<Point2D>();
     private Polygon? _previewPolygon = null;
+    private List<SegmentInfo> _currentSegments = new List<SegmentInfo>();
     private TransformGroup _canvasTransform;
     private ScaleTransform _scaleTransform;
     private TranslateTransform _translateTransform;
@@ -369,8 +379,27 @@ public partial class MainWindow : Window
     {
         _isDrawing = true;
         _currentPoints.Clear();
+        _currentSegments.Clear();
+        UpdateSegmentList();
         txtInstructions.Visibility = Visibility.Collapsed;
         UpdateStatusBar("Drawing mode: Click to add points. Right-click or ESC to finish.");
+    }
+
+    private void UpdateSegmentList()
+    {
+        dgSegments.ItemsSource = null;
+        dgSegments.ItemsSource = _currentSegments;
+    }
+
+    private void AddSegment(double angle, double length)
+    {
+        var segment = new SegmentInfo
+        {
+            Angle = angle.ToString("F1"),
+            Length = length.ToString("F1")
+        };
+        _currentSegments.Add(segment);
+        UpdateSegmentList();
     }
 
     private void FinishDrawing()
@@ -617,6 +646,41 @@ public partial class MainWindow : Window
             var end = _currentPoints[lastIdx];
 
             DrawLine(start, end, Brushes.Blue, 1);
+
+            // Calculate segment info for the list
+            double segmentLength = start.DistanceTo(end);
+            double segmentAngle = 0;
+
+            // For the first segment, angle is 0
+            if (_currentPoints.Count == 2)
+            {
+                segmentAngle = 0;
+            }
+            else
+            {
+                // Calculate angle between this segment and the previous one
+                var prevStart = _currentPoints[lastIdx - 2];
+                var prevEnd = _currentPoints[lastIdx - 1];
+
+                // Vector of previous segment
+                double prevDx = prevEnd.X - prevStart.X;
+                double prevDy = prevEnd.Y - prevStart.Y;
+                double prevAngle = Math.Atan2(prevDy, prevDx);
+
+                // Vector of current segment
+                double currDx = end.X - start.X;
+                double currDy = end.Y - start.Y;
+                double currAngle = Math.Atan2(currDy, currDx);
+
+                // Angle between segments (in degrees)
+                segmentAngle = (currAngle - prevAngle) * 180.0 / Math.PI;
+
+                // Normalize to -180 to 180
+                while (segmentAngle > 180) segmentAngle -= 360;
+                while (segmentAngle < -180) segmentAngle += 360;
+            }
+
+            AddSegment(segmentAngle, segmentLength);
         }
 
         UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
