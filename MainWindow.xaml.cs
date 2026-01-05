@@ -728,6 +728,13 @@ public partial class MainWindow : Window
             }
 
             AddSegment(segmentAngle, segmentLength);
+
+            // Automatically finish and save after first segment is created
+            if (_currentPoints.Count == 2)
+            {
+                FinishDrawing();
+                return;
+            }
         }
 
         UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
