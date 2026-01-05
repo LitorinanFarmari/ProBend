@@ -43,6 +43,7 @@ public partial class MainWindow : Window
     private List<SavedBusbar> _savedBusbars = new List<SavedBusbar>();
     private List<Shape> _currentShapes = new List<Shape>(); // Track shapes being drawn
     private int _currentBusbarIndex = -1; // Index of the busbar being edited (-1 if new)
+    private char _nextBusbarLetter = 'a'; // Next letter to use for busbar naming
     private TransformGroup _canvasTransform;
     private ScaleTransform _scaleTransform;
     private TranslateTransform _translateTransform;
@@ -397,7 +398,7 @@ public partial class MainWindow : Window
         _currentShapes.Clear();
         _currentBusbarIndex = -1;
         UpdateSegmentList();
-        txtBusbarName.Text = "a";
+        txtBusbarName.Text = _nextBusbarLetter.ToString();
         txtInstructions.Visibility = Visibility.Collapsed;
         UpdateStatusBar("Drawing mode: Click to add points. Right-click or ESC to finish.");
     }
@@ -536,6 +537,16 @@ public partial class MainWindow : Window
 
         // Clear the segment list in the right panel
         UpdateSegmentList();
+
+        // Increment to next letter for next busbar (a -> b -> c ... z -> aa -> ab ...)
+        if (_nextBusbarLetter == 'z')
+        {
+            _nextBusbarLetter = 'a'; // Could be extended to 'aa', 'ab', etc. if needed
+        }
+        else
+        {
+            _nextBusbarLetter++;
+        }
 
         UpdateUI();
         UpdateStatusBar($"Busbar '{busbarName}' finished");
