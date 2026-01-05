@@ -42,6 +42,7 @@ public partial class MainWindow : Window
     private List<SegmentInfo> _currentSegments = new List<SegmentInfo>();
     private List<SavedBusbar> _savedBusbars = new List<SavedBusbar>();
     private List<Shape> _currentShapes = new List<Shape>(); // Track shapes being drawn
+    private int _currentBusbarIndex = -1; // Index of the busbar being edited (-1 if new)
     private TransformGroup _canvasTransform;
     private ScaleTransform _scaleTransform;
     private TranslateTransform _translateTransform;
@@ -394,6 +395,7 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _currentSegments.Clear();
         _currentShapes.Clear();
+        _currentBusbarIndex = -1;
         UpdateSegmentList();
         txtBusbarName.Text = "a";
         txtInstructions.Visibility = Visibility.Collapsed;
@@ -415,6 +417,44 @@ public partial class MainWindow : Window
         };
         _currentSegments.Add(segment);
         UpdateSegmentList();
+    }
+
+    private void SaveOrUpdateCurrentBusbar()
+    {
+        if (_currentPoints.Count < 2) return;
+
+        // Get the busbar name from the textbox
+        string busbarName = string.IsNullOrWhiteSpace(txtBusbarName.Text) ? "a" : txtBusbarName.Text;
+
+        if (_currentBusbarIndex == -1)
+        {
+            // Create new SavedBusbar
+            var savedBusbar = new SavedBusbar
+            {
+                Name = busbarName,
+                Points = new List<Point2D>(_currentPoints),
+                Segments = new List<SegmentInfo>(_currentSegments),
+                Shapes = new List<Shape>(_currentShapes)
+            };
+
+            _savedBusbars.Add(savedBusbar);
+            _currentBusbarIndex = _savedBusbars.Count - 1;
+
+            // Add to the left panel ListBox
+            lstBusbars.Items.Add(busbarName);
+        }
+        else
+        {
+            // Update existing SavedBusbar
+            var savedBusbar = _savedBusbars[_currentBusbarIndex];
+            savedBusbar.Name = busbarName;
+            savedBusbar.Points = new List<Point2D>(_currentPoints);
+            savedBusbar.Segments = new List<SegmentInfo>(_currentSegments);
+            savedBusbar.Shapes = new List<Shape>(_currentShapes);
+
+            // Update the ListBox item
+            lstBusbars.Items[_currentBusbarIndex] = busbarName;
+        }
     }
 
     private void FinishDrawing()
@@ -485,6 +525,7 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _currentSegments.Clear();
         _currentShapes.Clear();
+        _currentBusbarIndex = -1;
 
         // Remove preview polygon if it exists
         if (_previewPolygon != null)
@@ -497,7 +538,7 @@ public partial class MainWindow : Window
         UpdateSegmentList();
 
         UpdateUI();
-        UpdateStatusBar($"Busbar '{busbarName}' created and saved");
+        UpdateStatusBar($"Busbar '{busbarName}' finished");
     }
 
     private double CalculateBendAngle(int segmentIndex)
@@ -729,12 +770,8 @@ public partial class MainWindow : Window
 
             AddSegment(segmentAngle, segmentLength);
 
-            // Automatically finish and save after first segment is created
-            if (_currentPoints.Count == 2)
-            {
-                FinishDrawing();
-                return;
-            }
+            // Automatically save or update the busbar after each segment
+            SaveOrUpdateCurrentBusbar();
         }
 
         UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
