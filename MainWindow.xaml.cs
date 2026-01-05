@@ -480,10 +480,21 @@ public partial class MainWindow : Window
             activeLayer.AddBusbar(busbar);
         }
 
+        // Clean up drawing state
         _isDrawing = false;
         _currentPoints.Clear();
         _currentSegments.Clear();
         _currentShapes.Clear();
+
+        // Remove preview polygon if it exists
+        if (_previewPolygon != null)
+        {
+            drawingCanvas.Children.Remove(_previewPolygon);
+            _previewPolygon = null;
+        }
+
+        // Clear the segment list in the right panel
+        UpdateSegmentList();
 
         UpdateUI();
         UpdateStatusBar($"Busbar '{busbarName}' created and saved");
@@ -988,7 +999,7 @@ public partial class MainWindow : Window
         }
         else if (e.Key == Key.Escape && _isDrawing)
         {
-            CancelDrawing();
+            FinishDrawing();
         }
         else if (e.Key == Key.Add || e.Key == Key.OemPlus)
         {
