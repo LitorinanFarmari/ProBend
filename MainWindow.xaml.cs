@@ -399,6 +399,10 @@ public partial class MainWindow : Window
         _currentBusbarIndex = -1;
         UpdateSegmentList();
         txtBusbarName.Text = _nextBusbarLetter.ToString();
+
+        // Clear the busbar selection when starting a new drawing
+        lstBusbars.SelectedIndex = -1;
+
         txtInstructions.Visibility = Visibility.Collapsed;
         UpdateStatusBar("Drawing mode: Click to add points. Right-click or ESC to finish.");
     }
@@ -512,6 +516,9 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _currentSegments.Clear();
         _currentShapes.Clear();
+
+        // Keep the busbar selected in the list
+        int finishedBusbarIndex = _currentBusbarIndex;
         _currentBusbarIndex = -1;
 
         // Remove preview polygon if it exists
@@ -521,8 +528,11 @@ public partial class MainWindow : Window
             _previewPolygon = null;
         }
 
-        // Clear the segment list in the right panel
-        UpdateSegmentList();
+        // Select the finished busbar in the ListBox
+        if (finishedBusbarIndex >= 0 && finishedBusbarIndex < lstBusbars.Items.Count)
+        {
+            lstBusbars.SelectedIndex = finishedBusbarIndex;
+        }
 
         // Increment to next letter for next busbar (a -> b -> c ... z -> aa -> ab ...)
         if (_nextBusbarLetter == 'z')
