@@ -10,11 +10,11 @@ none
 false
 TRACE;DEBUG;NET;NET8_0;NETCOREAPP
 C:\Users\ossiv\Documents\code\BusbarCAD\App.xaml
-22113478471
+3-1444913353
 
-16-322686961
+17201908562
 208-1077774415
-MainWindow.xaml;UI\DimensionDialog.xaml;
+InputDialog.xaml;MainWindow.xaml;UI\DimensionDialog.xaml;
 
 False
 

@@ -687,13 +687,15 @@ public partial class MainWindow : Window
             var start = _currentPoints[_currentPoints.Count - 1];
             double currentLength = start.DistanceTo(pt);
 
-            // Simple prompt for length
-            string input = Microsoft.VisualBasic.Interaction.InputBox(
+            // Custom dialog for length input with pre-selected text
+            var dialog = new InputDialog(
                 $"Enter length in mm (current: {currentLength:F1}mm):",
-                "Segment Length",
                 currentLength.ToString("F0"));
 
-            if (!string.IsNullOrEmpty(input) && double.TryParse(input, out double desiredLength) && desiredLength > 0)
+            if (dialog.ShowDialog() == true &&
+                !string.IsNullOrEmpty(dialog.ResponseText) &&
+                double.TryParse(dialog.ResponseText, out double desiredLength) &&
+                desiredLength > 0)
             {
                 // Adjust the end point to match desired length
                 double dx = pt.X - start.X;
