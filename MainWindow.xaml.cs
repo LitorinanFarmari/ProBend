@@ -553,81 +553,6 @@ public partial class MainWindow : Window
         return angle;  // No snap, return original angle
     }
 
-    private void ApplyMeasurement()
-    {
-        if (!double.TryParse(_measurementInput, out double desiredLength) || desiredLength <= 0)
-        {
-            UpdateStatusBar("Invalid measurement");
-            return;
-        }
-
-        // Get the start point
-        var start = _currentPoints[_currentPoints.Count - 1];
-
-        // Calculate new end point at desired length using the stored angle
-        Point2D pt = new Point2D(
-            start.X + desiredLength * Math.Cos(_pendingAngle),
-            start.Y + desiredLength * Math.Sin(_pendingAngle)
-        );
-
-        // Debug output
-        UpdateStatusBar($"Applied: length={desiredLength:F1}mm, angle={(_pendingAngle * 180 / Math.PI):F1}°, from ({start.X:F1},{start.Y:F1}) to ({pt.X:F1},{pt.Y:F1})");
-
-        // Add the point
-        _currentPoints.Add(pt);
-
-        // Remove preview and measurement text
-        if (_previewPolygon != null)
-        {
-            drawingCanvas.Children.Remove(_previewPolygon);
-            _previewPolygon = null;
-        }
-        if (_measurementTextBlock != null)
-        {
-            drawingCanvas.Children.Remove(_measurementTextBlock);
-            _measurementTextBlock = null;
-        }
-
-        // Draw rectangle
-        if (_currentPoints.Count >= 2)
-        {
-            var lastIdx = _currentPoints.Count - 1;
-            var startPt = _currentPoints[lastIdx - 1];
-            var endPt = _currentPoints[lastIdx];
-
-            DrawLine(startPt, endPt, Brushes.Blue, 1);
-        }
-
-        // Reset measurement input state
-        _isWaitingForMeasurement = false;
-        _measurementInput = "";
-        _pendingEndPoint = null;
-
-        UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
-    }
-
-    private void CancelMeasurementInput()
-    {
-        // Remove preview and measurement text
-        if (_previewPolygon != null)
-        {
-            drawingCanvas.Children.Remove(_previewPolygon);
-            _previewPolygon = null;
-        }
-        if (_measurementTextBlock != null)
-        {
-            drawingCanvas.Children.Remove(_measurementTextBlock);
-            _measurementTextBlock = null;
-        }
-
-        // Reset measurement input state
-        _isWaitingForMeasurement = false;
-        _measurementInput = "";
-        _pendingEndPoint = null;
-
-        UpdateStatusBar("Measurement cancelled");
-    }
-
     // Canvas Event Handlers
     private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -639,27 +564,40 @@ public partial class MainWindow : Window
         var point = e.GetPosition(drawingCanvas);
         var pt = new Point2D(point.X, point.Y);
 
-        // If this is the second click, enter measurement input mode
+        // If this is the second point, ask for exact length
         if (_currentPoints.Count >= 1)
         {
             var start = _currentPoints[_currentPoints.Count - 1];
-            double dx = pt.X - start.X;
-            double dy = pt.Y - start.Y;
-            double angle = Math.Atan2(dy, dx);
+            double currentLength = start.DistanceTo(pt);
 
-            // Apply snapping to horizontal/vertical
-            angle = SnapAngle(angle);
+            // Simple prompt for length
+            string input = Microsoft.VisualBasic.Interaction.InputBox(
+                $"Enter length in mm (current: {currentLength:F1}mm):",
+                "Segment Length",
+                currentLength.ToString("F0"));
 
-            // Store the angle and endpoint for later use
-            _pendingAngle = angle;
-            _pendingEndPoint = pt;
+            if (!string.IsNullOrEmpty(input) && double.TryParse(input, out double desiredLength) && desiredLength > 0)
+            {
+                // Adjust the end point to match desired length
+                double dx = pt.X - start.X;
+                double dy = pt.Y - start.Y;
+                double angle = Math.Atan2(dy, dx);
 
-            // Enter measurement input mode
-            _isWaitingForMeasurement = true;
-            _measurementInput = start.DistanceTo(pt).ToString("F0");
+                // Apply snapping to horizontal/vertical
+                angle = SnapAngle(angle);
 
-            UpdateStatusBar("Type measurement and press Enter, or ESC to cancel");
-            return;
+                // Calculate new end point at desired length
+                pt = new Point2D(
+                    start.X + desiredLength * Math.Cos(angle),
+                    start.Y + desiredLength * Math.Sin(angle)
+                );
+            }
+            else
+            {
+                // User cancelled
+                UpdateStatusBar("Segment cancelled");
+                return;
+            }
         }
 
         _currentPoints.Add(pt);
@@ -710,13 +648,6 @@ public partial class MainWindow : Window
             _previewPolygon = null;
         }
 
-        // Remove old measurement text
-        if (_measurementTextBlock != null)
-        {
-            drawingCanvas.Children.Remove(_measurementTextBlock);
-            _measurementTextBlock = null;
-        }
-
         // Need at least one point to draw preview
         if (_currentPoints.Count == 0) return;
 
@@ -734,36 +665,17 @@ public partial class MainWindow : Window
 
         if (length < 0.1) return; // Too short to draw
 
+        // Enforce minimum length of 50mm
+        if (length < minLength)
+        {
+            length = minLength;
+        }
+
         // Normalize direction and apply length
         double angle = Math.Atan2(dy, dx);
 
         // Snap to horizontal or vertical if within 10 degrees
         angle = SnapAngle(angle);
-
-        // If waiting for measurement, use typed value; otherwise use mouse distance
-        if (_isWaitingForMeasurement)
-        {
-            // Update the pending angle as mouse moves
-            _pendingAngle = angle;
-
-            // Use typed measurement if valid, otherwise use minimum length
-            if (double.TryParse(_measurementInput, out double typedLength) && typedLength > 0)
-            {
-                length = typedLength;
-            }
-            else
-            {
-                length = minLength;
-            }
-        }
-        else
-        {
-            // Enforce minimum length of 50mm
-            if (length < minLength)
-            {
-                length = minLength;
-            }
-        }
 
         Point2D endPoint = new Point2D(
             lastPoint.X + length * Math.Cos(angle),
@@ -797,39 +709,6 @@ public partial class MainWindow : Window
         };
 
         drawingCanvas.Children.Add(_previewPolygon);
-
-        // Always show the measurement text during preview
-        // Calculate midpoint of the segment
-        double midX = (lastPoint.X + endPoint.X) / 2;
-        double midY = (lastPoint.Y + endPoint.Y) / 2;
-
-        string displayText;
-        if (_isWaitingForMeasurement)
-        {
-            // Show typed measurement
-            displayText = string.IsNullOrEmpty(_measurementInput) ? "0mm" : _measurementInput + "mm";
-        }
-        else
-        {
-            // Show current length
-            displayText = $"{length:F0}mm";
-        }
-
-        _measurementTextBlock = new TextBlock
-        {
-            Text = displayText,
-            FontSize = 16,
-            FontWeight = FontWeights.Bold,
-            Foreground = _isWaitingForMeasurement ? Brushes.Blue : Brushes.Gray,
-            Background = Brushes.White,
-            Padding = new Thickness(4),
-            IsHitTestVisible = false
-        };
-
-        Canvas.SetLeft(_measurementTextBlock, midX);
-        Canvas.SetTop(_measurementTextBlock, midY - 10);
-
-        drawingCanvas.Children.Add(_measurementTextBlock);
     }
 
     private void Canvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
@@ -997,60 +876,6 @@ public partial class MainWindow : Window
     // Keyboard Shortcuts
     private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
-        // Handle measurement input mode
-        if (_isWaitingForMeasurement)
-        {
-            if (e.Key == Key.Enter)
-            {
-                // Apply the measurement and finalize the segment
-                ApplyMeasurement();
-                e.Handled = true;
-                return;
-            }
-            else if (e.Key == Key.Escape)
-            {
-                // Cancel measurement input
-                CancelMeasurementInput();
-                e.Handled = true;
-                return;
-            }
-            else if (e.Key == Key.Back)
-            {
-                // Delete last character
-                if (_measurementInput.Length > 0)
-                {
-                    _measurementInput = _measurementInput.Substring(0, _measurementInput.Length - 1);
-                }
-                e.Handled = true;
-                return;
-            }
-            else if (e.Key >= Key.D0 && e.Key <= Key.D9)
-            {
-                // Number keys
-                _measurementInput += (e.Key - Key.D0).ToString();
-                e.Handled = true;
-                return;
-            }
-            else if (e.Key >= Key.NumPad0 && e.Key <= Key.NumPad9)
-            {
-                // Numpad keys
-                _measurementInput += (e.Key - Key.NumPad0).ToString();
-                e.Handled = true;
-                return;
-            }
-            else if (e.Key == Key.OemPeriod || e.Key == Key.Decimal)
-            {
-                // Decimal point
-                if (!_measurementInput.Contains("."))
-                {
-                    _measurementInput += ".";
-                }
-                e.Handled = true;
-                return;
-            }
-        }
-
-        // Normal key handlers
         if (e.Key == Key.D && !_isDrawing)
         {
             StartDrawing();
