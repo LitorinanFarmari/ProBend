@@ -873,6 +873,56 @@ public partial class MainWindow : Window
         };
 
         drawingCanvas.Children.Add(_previewPolygon);
+
+        // Update the right panel with live preview measurements
+        UpdateLivePreviewMeasurements(lastPoint, endPoint);
+    }
+
+    private void UpdateLivePreviewMeasurements(Point2D start, Point2D end)
+    {
+        if (_currentPoints.Count == 0) return;
+
+        // Calculate preview segment length
+        double previewLength = start.DistanceTo(end);
+        double previewAngle = 0;
+
+        // For the first segment preview, angle is 0
+        if (_currentPoints.Count == 1)
+        {
+            previewAngle = 0;
+        }
+        else
+        {
+            // Calculate angle between the last segment and the preview segment
+            var prevStart = _currentPoints[_currentPoints.Count - 2];
+            var prevEnd = _currentPoints[_currentPoints.Count - 1];
+
+            double prevDx = prevEnd.X - prevStart.X;
+            double prevDy = prevEnd.Y - prevStart.Y;
+            double prevSegAngle = Math.Atan2(prevDy, prevDx);
+
+            double currDx = end.X - start.X;
+            double currDy = end.Y - start.Y;
+            double currSegAngle = Math.Atan2(currDy, currDx);
+
+            previewAngle = (currSegAngle - prevSegAngle) * 180.0 / Math.PI;
+
+            // Normalize to -180 to 180
+            while (previewAngle > 180) previewAngle -= 360;
+            while (previewAngle < -180) previewAngle += 360;
+        }
+
+        // Create a temporary list with current segments + preview
+        var tempSegments = new List<SegmentInfo>(_currentSegments);
+        tempSegments.Add(new SegmentInfo
+        {
+            Angle = previewAngle.ToString("F1"),
+            Length = previewLength.ToString("F1")
+        });
+
+        // Update the DataGrid with the preview
+        dgSegments.ItemsSource = null;
+        dgSegments.ItemsSource = tempSegments;
     }
 
     private void Canvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
