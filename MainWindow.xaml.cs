@@ -381,6 +381,7 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _currentSegments.Clear();
         UpdateSegmentList();
+        txtBusbarName.Text = "a";
         txtInstructions.Visibility = Visibility.Collapsed;
         UpdateStatusBar("Drawing mode: Click to add points. Right-click or ESC to finish.");
     }
