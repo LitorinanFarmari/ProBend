@@ -50,13 +50,17 @@ public partial class MainWindow : Window
     private bool _isPanning = false;
     private System.Windows.Point _lastPanPoint;
     private bool _handToolActive = false;
+    private bool _waitingForLengthInput = false;
+    private double _pendingAngle = 0;
+    private System.Windows.Threading.DispatcherTimer? _mouseStopTimer;
+    private bool _isEditingLength = false;
 
     public MainWindow()
     {
         InitializeComponent();
         InitializeCanvasTransform();
         InitializeProject();
-        this.KeyDown += Window_KeyDown;
+        this.PreviewKeyDown += Window_KeyDown;
     }
 
     private void InitializeCanvasTransform()
@@ -685,46 +689,67 @@ public partial class MainWindow : Window
         // Don't interfere with panning
         if (_isPanning) return;
 
+        // If we're waiting for length input, commit it (same as pressing Enter)
+        if (_waitingForLengthInput)
+        {
+            // Commit the current edit in the DataGrid (same as pressing Enter)
+            dgSegments.CommitEdit();
+            dgSegments.CommitEdit(); // Need to call twice: once for cell, once for row
+            return;
+        }
+
         var point = e.GetPosition(drawingCanvas);
         var pt = new Point2D(point.X, point.Y);
 
-        // If this is the second point, ask for exact length
-        if (_currentPoints.Count >= 1)
+        // First point - just add it
+        _currentPoints.Add(pt);
+        UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
+    }
+
+    private void DataGrid_PreparingCellForEdit(object sender, DataGridPreparingCellForEditEventArgs e)
+    {
+        if (e.EditingElement is System.Windows.Controls.TextBox textBox)
         {
-            var start = _currentPoints[_currentPoints.Count - 1];
-            double currentLength = start.DistanceTo(pt);
-
-            // Custom dialog for length input with pre-selected text
-            var dialog = new InputDialog(
-                $"Enter length in mm (current: {currentLength:F1}mm):",
-                currentLength.ToString("F0"));
-
-            if (dialog.ShowDialog() == true &&
-                !string.IsNullOrEmpty(dialog.ResponseText) &&
-                double.TryParse(dialog.ResponseText, out double desiredLength) &&
-                desiredLength > 0)
-            {
-                // Adjust the end point to match desired length
-                double dx = pt.X - start.X;
-                double dy = pt.Y - start.Y;
-                double angle = Math.Atan2(dy, dx);
-
-                // Apply snapping to horizontal/vertical
-                angle = SnapAngle(angle);
-
-                // Calculate new end point at desired length
-                pt = new Point2D(
-                    start.X + desiredLength * Math.Cos(angle),
-                    start.Y + desiredLength * Math.Sin(angle)
-                );
-            }
-            else
-            {
-                // User cancelled
-                UpdateStatusBar("Segment cancelled");
-                return;
-            }
+            textBox.Focus();
+            textBox.SelectAll();
         }
+    }
+
+    private void DataGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
+    {
+        if (!_waitingForLengthInput) return;
+
+        // If user cancels (moves mouse away), reset the editing flag so timer can work again
+        if (e.EditAction == DataGridEditAction.Cancel)
+        {
+            _isEditingLength = false;
+            return;
+        }
+
+        if (e.EditAction != DataGridEditAction.Commit) return;
+
+        // Get the edited length value
+        var textBox = e.EditingElement as System.Windows.Controls.TextBox;
+        if (textBox == null) return;
+
+        if (!double.TryParse(textBox.Text, out double desiredLength) || desiredLength <= 0)
+        {
+            UpdateStatusBar("Invalid length. Segment cancelled.");
+            _waitingForLengthInput = false;
+            _isEditingLength = false;
+
+            // Restore the DataGrid to show only confirmed segments
+            dgSegments.ItemsSource = null;
+            dgSegments.ItemsSource = _currentSegments;
+            return;
+        }
+
+        // Calculate the new end point with the desired length
+        var start = _currentPoints[_currentPoints.Count - 1];
+        var pt = new Point2D(
+            start.X + desiredLength * Math.Cos(_pendingAngle),
+            start.Y + desiredLength * Math.Sin(_pendingAngle)
+        );
 
         _currentPoints.Add(pt);
 
@@ -735,55 +760,56 @@ public partial class MainWindow : Window
             _previewPolygon = null;
         }
 
-        // Draw rectangle if we have at least 2 points
-        if (_currentPoints.Count >= 2)
+        // Draw the segment
+        var lastIdx = _currentPoints.Count - 1;
+        var segmentStart = _currentPoints[lastIdx - 1];
+        var segmentEnd = _currentPoints[lastIdx];
+
+        DrawLine(segmentStart, segmentEnd, Brushes.Blue, 1);
+
+        // Calculate segment info for the list
+        double segmentLength = segmentStart.DistanceTo(segmentEnd);
+        double segmentAngle = 0;
+
+        // For the first segment, angle is 0
+        if (_currentPoints.Count == 2)
         {
-            var lastIdx = _currentPoints.Count - 1;
-            var start = _currentPoints[lastIdx - 1];
-            var end = _currentPoints[lastIdx];
+            segmentAngle = 0;
+        }
+        else
+        {
+            // Calculate angle between this segment and the previous one
+            var prevStart = _currentPoints[lastIdx - 2];
+            var prevEnd = _currentPoints[lastIdx - 1];
 
-            DrawLine(start, end, Brushes.Blue, 1);
+            // Vector of previous segment
+            double prevDx = prevEnd.X - prevStart.X;
+            double prevDy = prevEnd.Y - prevStart.Y;
+            double prevAngle = Math.Atan2(prevDy, prevDx);
 
-            // Calculate segment info for the list
-            double segmentLength = start.DistanceTo(end);
-            double segmentAngle = 0;
+            // Vector of current segment
+            double currDx = segmentEnd.X - segmentStart.X;
+            double currDy = segmentEnd.Y - segmentStart.Y;
+            double currAngle = Math.Atan2(currDy, currDx);
 
-            // For the first segment, angle is 0
-            if (_currentPoints.Count == 2)
-            {
-                segmentAngle = 0;
-            }
-            else
-            {
-                // Calculate angle between this segment and the previous one
-                var prevStart = _currentPoints[lastIdx - 2];
-                var prevEnd = _currentPoints[lastIdx - 1];
+            // Angle between segments (in degrees)
+            segmentAngle = (currAngle - prevAngle) * 180.0 / Math.PI;
 
-                // Vector of previous segment
-                double prevDx = prevEnd.X - prevStart.X;
-                double prevDy = prevEnd.Y - prevStart.Y;
-                double prevAngle = Math.Atan2(prevDy, prevDx);
-
-                // Vector of current segment
-                double currDx = end.X - start.X;
-                double currDy = end.Y - start.Y;
-                double currAngle = Math.Atan2(currDy, currDx);
-
-                // Angle between segments (in degrees)
-                segmentAngle = (currAngle - prevAngle) * 180.0 / Math.PI;
-
-                // Normalize to -180 to 180
-                while (segmentAngle > 180) segmentAngle -= 360;
-                while (segmentAngle < -180) segmentAngle += 360;
-            }
-
-            AddSegment(segmentAngle, segmentLength);
-
-            // Automatically save or update the busbar after each segment
-            SaveOrUpdateCurrentBusbar();
+            // Normalize to -180 to 180
+            while (segmentAngle > 180) segmentAngle -= 360;
+            while (segmentAngle < -180) segmentAngle += 360;
         }
 
-        UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
+        AddSegment(segmentAngle, segmentLength);
+
+        // Automatically save or update the busbar after each segment
+        SaveOrUpdateCurrentBusbar();
+
+        // Reset waiting state for next segment
+        _waitingForLengthInput = false;
+        _isEditingLength = false;
+
+        UpdateStatusBar($"Segment added. Move mouse for next segment or press Esc to finish.");
     }
 
     private void Canvas_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
@@ -846,6 +872,9 @@ public partial class MainWindow : Window
             lastPoint.Y + length * Math.Sin(angle)
         );
 
+        // Store the pending angle for when user confirms
+        _pendingAngle = angle;
+
         // Recalculate perpendicular based on normalized direction
         double perpX = -Math.Sin(angle);
         double perpY = Math.Cos(angle);
@@ -876,9 +905,59 @@ public partial class MainWindow : Window
 
         // Update the right panel with live preview measurements
         UpdateLivePreviewMeasurements(lastPoint, endPoint);
+
+        // After first point, start/restart timer to detect when mouse stops
+        if (_currentPoints.Count >= 1)
+        {
+            if (!_waitingForLengthInput)
+            {
+                _waitingForLengthInput = true;
+            }
+
+            // Reset editing flag when mouse moves (allow re-highlighting on next stop)
+            if (_isEditingLength)
+            {
+                _isEditingLength = false;
+                // Cancel any active edit in the DataGrid
+                dgSegments.CancelEdit();
+            }
+
+            // Initialize timer if needed
+            if (_mouseStopTimer == null)
+            {
+                _mouseStopTimer = new System.Windows.Threading.DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(200) // 200ms delay
+                };
+                _mouseStopTimer.Tick += MouseStopTimer_Tick;
+            }
+
+            // Restart the timer - if mouse keeps moving, it keeps resetting
+            _mouseStopTimer.Stop();
+            _mouseStopTimer.Start();
+        }
     }
 
-    private void UpdateLivePreviewMeasurements(Point2D start, Point2D end)
+    private void MouseStopTimer_Tick(object? sender, EventArgs e)
+    {
+        _mouseStopTimer?.Stop();
+
+        if (!_waitingForLengthInput) return;
+
+        // Focus the last row's Length cell for editing
+        if (dgSegments.Items.Count > 0)
+        {
+            int lastRowIndex = dgSegments.Items.Count - 1;
+            dgSegments.CurrentCell = new DataGridCellInfo(dgSegments.Items[lastRowIndex], dgSegments.Columns[1]);
+            dgSegments.Focus();
+            dgSegments.BeginEdit();
+            _isEditingLength = true;
+        }
+
+        UpdateStatusBar("Type length and press Enter to confirm segment");
+    }
+
+    private void UpdateLivePreviewMeasurements(Point2D start, Point2D end, string? lengthOverride = null)
     {
         if (_currentPoints.Count == 0) return;
 
@@ -917,7 +996,7 @@ public partial class MainWindow : Window
         tempSegments.Add(new SegmentInfo
         {
             Angle = previewAngle.ToString("F1"),
-            Length = previewLength.ToString("F1")
+            Length = lengthOverride ?? previewLength.ToString("F1")
         });
 
         // Update the DataGrid with the preview
@@ -929,6 +1008,8 @@ public partial class MainWindow : Window
     {
         if (_isDrawing)
         {
+            // Cancel any pending input and finish drawing
+            _waitingForLengthInput = false;
             FinishDrawing();
         }
     }
@@ -1102,7 +1183,18 @@ public partial class MainWindow : Window
         }
         else if (e.Key == Key.Escape && _isDrawing)
         {
+            // Cancel any active DataGrid edit first
+            if (_isEditingLength)
+            {
+                dgSegments.CancelEdit();
+                _isEditingLength = false;
+            }
+
+            // Cancel any pending input and finish drawing (same as right-click)
+            _waitingForLengthInput = false;
+            _mouseStopTimer?.Stop();
             FinishDrawing();
+            e.Handled = true;
         }
         else if (e.Key == Key.Add || e.Key == Key.OemPlus)
         {

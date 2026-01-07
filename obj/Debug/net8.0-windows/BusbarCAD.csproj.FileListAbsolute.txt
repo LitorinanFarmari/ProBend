@@ -23,5 +23,3 @@ C:\Users\ossiv\Documents\code\BusbarCAD\obj\Debug\net8.0-windows\refint\BusbarCA
 C:\Users\ossiv\Documents\code\BusbarCAD\obj\Debug\net8.0-windows\BusbarCAD.pdb
 C:\Users\ossiv\Documents\code\BusbarCAD\obj\Debug\net8.0-windows\BusbarCAD.genruntimeconfig.cache
 C:\Users\ossiv\Documents\code\BusbarCAD\obj\Debug\net8.0-windows\ref\BusbarCAD.dll
-C:\Users\ossiv\Documents\code\BusbarCAD\obj\Debug\net8.0-windows\InputDialog.baml
-C:\Users\ossiv\Documents\code\BusbarCAD\obj\Debug\net8.0-windows\InputDialog.g.cs

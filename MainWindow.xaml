@@ -172,13 +172,14 @@
                               AutoGenerateColumns="False"
                               CanUserAddRows="False"
                               CanUserDeleteRows="False"
-                              IsReadOnly="True"
                               GridLinesVisibility="All"
                               HeadersVisibility="Column"
-                              Height="Auto">
+                              Height="Auto"
+                              CellEditEnding="DataGrid_CellEditEnding"
+                              PreparingCellForEdit="DataGrid_PreparingCellForEdit">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Angle (°)" Binding="{Binding Angle}" Width="*"/>
-                            <DataGridTextColumn Header="Length (mm)" Binding="{Binding Length}" Width="*"/>
+                            <DataGridTextColumn Header="Angle (°)" Binding="{Binding Angle}" Width="*" IsReadOnly="True"/>
+                            <DataGridTextColumn Header="Length (mm)" Binding="{Binding Length}" Width="*" IsReadOnly="False"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </StackPanel>
