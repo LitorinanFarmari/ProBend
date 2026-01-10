@@ -54,6 +54,7 @@ public partial class MainWindow : Window
     private double _pendingAngle = 0;
     private System.Windows.Threading.DispatcherTimer? _mouseStopTimer;
     private bool _isEditingLength = false;
+    private System.Windows.Controls.TextBox? _currentEditingTextBox = null;
 
     public MainWindow()
     {
@@ -712,6 +713,78 @@ public partial class MainWindow : Window
         {
             textBox.Focus();
             textBox.SelectAll();
+
+            // Only attach handler if this is a different textbox
+            if (_currentEditingTextBox != textBox)
+            {
+                // Remove old handler if it exists
+                if (_currentEditingTextBox != null)
+                {
+                    _currentEditingTextBox.TextChanged -= LengthTextBox_TextChanged;
+                }
+
+                _currentEditingTextBox = textBox;
+                textBox.TextChanged += LengthTextBox_TextChanged;
+            }
+        }
+    }
+
+    private void LengthTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (!_waitingForLengthInput) return;
+        if (_currentPoints.Count == 0) return;
+
+        var textBox = sender as System.Windows.Controls.TextBox;
+        if (textBox == null) return;
+
+        // Try to parse the current text
+        if (double.TryParse(textBox.Text, out double typedLength) && typedLength > 0)
+        {
+            // Update the preview with the typed length
+            var lastPoint = _currentPoints[_currentPoints.Count - 1];
+            var endPoint = new Point2D(
+                lastPoint.X + typedLength * Math.Cos(_pendingAngle),
+                lastPoint.Y + typedLength * Math.Sin(_pendingAngle)
+            );
+
+            // Remove old preview polygon
+            if (_previewPolygon != null)
+            {
+                drawingCanvas.Children.Remove(_previewPolygon);
+                _previewPolygon = null;
+            }
+
+            // Draw new preview with typed length
+            const double busbarWidth = 10.0;
+            double halfWidth = busbarWidth / 2.0;
+            double perpX = -Math.Sin(_pendingAngle);
+            double perpY = Math.Cos(_pendingAngle);
+
+            Point2D p1 = new Point2D(lastPoint.X + perpX * halfWidth, lastPoint.Y + perpY * halfWidth);
+            Point2D p2 = new Point2D(lastPoint.X - perpX * halfWidth, lastPoint.Y - perpY * halfWidth);
+            Point2D p3 = new Point2D(endPoint.X - perpX * halfWidth, endPoint.Y - perpY * halfWidth);
+            Point2D p4 = new Point2D(endPoint.X + perpX * halfWidth, endPoint.Y + perpY * halfWidth);
+
+            _previewPolygon = new Polygon
+            {
+                Stroke = Brushes.Gray,
+                Fill = Brushes.Transparent,
+                StrokeThickness = 1,
+                StrokeDashArray = new DoubleCollection { 4, 2 },
+                IsHitTestVisible = false,
+                Points = new PointCollection
+                {
+                    new System.Windows.Point(p1.X, p1.Y),
+                    new System.Windows.Point(p4.X, p4.Y),
+                    new System.Windows.Point(p3.X, p3.Y),
+                    new System.Windows.Point(p2.X, p2.Y)
+                }
+            };
+
+            drawingCanvas.Children.Add(_previewPolygon);
+
+            // DON'T update DataGrid while typing - it causes focus loss
+            // The preview polygon is updated, which is enough visual feedback
         }
     }
 
