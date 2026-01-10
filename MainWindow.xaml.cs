@@ -55,6 +55,10 @@ public partial class MainWindow : Window
     private System.Windows.Threading.DispatcherTimer? _mouseStopTimer;
     private bool _isEditingLength = false;
     private System.Windows.Controls.TextBox? _currentEditingTextBox = null;
+    private Ellipse? _previewPoint = null; // Preview point that follows cursor
+    private Line? _previewLine = null; // Preview line from last point to cursor
+    private System.Windows.Shapes.Path? _previewArc = null; // Preview arc at the previous bend
+    private List<bool> _segmentsForcedToMinimum = new List<bool>(); // Track which segments were forced to minimum length
 
     public MainWindow()
     {
@@ -83,6 +87,16 @@ public partial class MainWindow : Window
         SetInitialScale();
     }
 
+    private void DrawingCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // Center the instruction text when canvas size changes
+        if (txtInstructions != null && drawingCanvas.ActualWidth > 0 && drawingCanvas.ActualHeight > 0)
+        {
+            Canvas.SetLeft(txtInstructions, (drawingCanvas.ActualWidth - txtInstructions.ActualWidth) / 2);
+            Canvas.SetTop(txtInstructions, (drawingCanvas.ActualHeight - txtInstructions.ActualHeight) / 2);
+        }
+    }
+
     private void SetInitialScale()
     {
         // Calculate scale so that 200mm fits comfortably in the canvas width
@@ -93,9 +107,9 @@ public partial class MainWindow : Window
         _scaleTransform.ScaleX = initialScale;
         _scaleTransform.ScaleY = initialScale;
 
-        // Center the origin
-        _translateTransform.X = canvasWidth * 0.1; // 10% margin from left
-        _translateTransform.Y = 100; // Some margin from top
+        // Start with no translation - user can pan as needed
+        _translateTransform.X = 0;
+        _translateTransform.Y = 0;
     }
 
     private void InitializeProject()
@@ -137,6 +151,7 @@ public partial class MainWindow : Window
 
         bool allValid = true;
         var errors = new List<string>();
+        var warnings = new List<string>();
 
         foreach (var busbar in activeLayer.Busbars)
         {
@@ -146,17 +161,24 @@ public partial class MainWindow : Window
                 allValid = false;
                 errors.AddRange(result.Errors);
             }
+            warnings.AddRange(result.Warnings);
         }
 
-        if (allValid)
+        if (allValid && warnings.Count == 0)
         {
             txtValidationStatus.Text = $"All busbars valid ({activeLayer.Busbars.Count} total)";
             txtValidationStatus.Foreground = Brushes.Green;
         }
-        else
+        else if (!allValid)
         {
             txtValidationStatus.Text = $"Validation errors:\n{string.Join("\n", errors.Take(3))}";
             txtValidationStatus.Foreground = Brushes.Red;
+        }
+        else
+        {
+            // Only warnings, no errors
+            txtValidationStatus.Text = $"Validation warnings:\n{string.Join("\n", warnings.Take(3))}";
+            txtValidationStatus.Foreground = Brushes.Orange;
         }
     }
 
@@ -401,7 +423,11 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _currentSegments.Clear();
         _currentShapes.Clear();
+        _segmentsForcedToMinimum.Clear();
         _currentBusbarIndex = -1;
+        _waitingForLengthInput = false;  // Reset input state
+        _isEditingLength = false;
+        _mouseStopTimer?.Stop();  // Stop any running timer
         UpdateSegmentList();
         txtBusbarName.Text = _nextBusbarLetter.ToString();
 
@@ -476,6 +502,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Redraw centerlines without any preview trimming to ensure the last segment is correct
+        RedrawCenterlines();
+
         // Get the busbar name from the textbox
         string busbarName = string.IsNullOrWhiteSpace(txtBusbarName.Text) ? "a" : txtBusbarName.Text;
 
@@ -495,6 +524,13 @@ public partial class MainWindow : Window
                 double length = start.DistanceTo(end);
 
                 var segment = new Segment(start, end, length);
+
+                // Set the WasForcedToMinimum flag if we have tracking data for this segment
+                if (i < _segmentsForcedToMinimum.Count)
+                {
+                    segment.WasForcedToMinimum = _segmentsForcedToMinimum[i];
+                }
+
                 busbar.AddSegment(segment);
 
                 // Add bend if not the last segment
@@ -521,16 +557,32 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _currentSegments.Clear();
         _currentShapes.Clear();
+        _segmentsForcedToMinimum.Clear();
 
         // Keep the busbar selected in the list
         int finishedBusbarIndex = _currentBusbarIndex;
         _currentBusbarIndex = -1;
 
-        // Remove preview polygon if it exists
+        // Remove preview shapes if they exist
         if (_previewPolygon != null)
         {
             drawingCanvas.Children.Remove(_previewPolygon);
             _previewPolygon = null;
+        }
+        if (_previewPoint != null)
+        {
+            drawingCanvas.Children.Remove(_previewPoint);
+            _previewPoint = null;
+        }
+        if (_previewLine != null)
+        {
+            drawingCanvas.Children.Remove(_previewLine);
+            _previewLine = null;
+        }
+        if (_previewArc != null)
+        {
+            drawingCanvas.Children.Remove(_previewArc);
+            _previewArc = null;
         }
 
         // Select the finished busbar in the ListBox
@@ -647,18 +699,80 @@ public partial class MainWindow : Window
     {
         _isDrawing = false;
         _currentPoints.Clear();
+        _segmentsForcedToMinimum.Clear();
         if (_previewPolygon != null)
         {
             drawingCanvas.Children.Remove(_previewPolygon);
             _previewPolygon = null;
         }
+        if (_previewPoint != null)
+        {
+            drawingCanvas.Children.Remove(_previewPoint);
+            _previewPoint = null;
+        }
+        if (_previewLine != null)
+        {
+            drawingCanvas.Children.Remove(_previewLine);
+            _previewLine = null;
+        }
+        if (_previewArc != null)
+        {
+            drawingCanvas.Children.Remove(_previewArc);
+            _previewArc = null;
+        }
         UpdateStatusBar("Drawing cancelled");
+    }
+
+    private Point2D GetCanvasMousePosition(System.Windows.Input.MouseEventArgs e)
+    {
+        // Get position in canvas coordinate space
+        // When using RenderTransform on canvas, GetPosition returns coordinates
+        // in the element's coordinate space, which is exactly what we need
+        var point = e.GetPosition(drawingCanvas);
+        return new Point2D(point.X, point.Y);
     }
 
     private double SnapAngle(double angle)
     {
         const double snapAngleDeg = 10.0;
+        const double maxAngleDeg = 90.0;
         double angleDeg = angle * 180.0 / Math.PI;
+
+        // Limit angle to ±90 degrees (limit angle between consecutive segments)
+        // We need to calculate the relative angle from the previous segment
+        if (_currentPoints.Count >= 1)
+        {
+            // Get the angle of the previous segment (if it exists)
+            double prevAngleRad = 0;
+            if (_currentPoints.Count >= 2)
+            {
+                var prevStart = _currentPoints[_currentPoints.Count - 2];
+                var prevEnd = _currentPoints[_currentPoints.Count - 1];
+                prevAngleRad = Math.Atan2(prevEnd.Y - prevStart.Y, prevEnd.X - prevStart.X);
+            }
+
+            // Calculate relative angle between segments
+            double relativeAngleRad = angle - prevAngleRad;
+            double relativeAngleDeg = relativeAngleRad * 180.0 / Math.PI;
+
+            // Normalize to -180 to 180
+            while (relativeAngleDeg > 180) relativeAngleDeg -= 360;
+            while (relativeAngleDeg < -180) relativeAngleDeg += 360;
+
+            // Clamp to ±90 degrees
+            if (relativeAngleDeg > maxAngleDeg)
+            {
+                relativeAngleDeg = maxAngleDeg;
+            }
+            else if (relativeAngleDeg < -maxAngleDeg)
+            {
+                relativeAngleDeg = -maxAngleDeg;
+            }
+
+            // Convert back to absolute angle
+            angle = prevAngleRad + (relativeAngleDeg * Math.PI / 180.0);
+            angleDeg = angle * 180.0 / Math.PI;
+        }
 
         // Check for horizontal snap (0° from the right or 180° from the left)
         if (Math.Abs(angleDeg) <= snapAngleDeg)
@@ -690,8 +804,9 @@ public partial class MainWindow : Window
         // Don't interfere with panning
         if (_isPanning) return;
 
-        // If we're waiting for length input, commit it (same as pressing Enter)
-        if (_waitingForLengthInput)
+        // If we're waiting for length input AND we have at least 2 points already, commit the edit
+        // For the first segment (0 or 1 points), allow clicking to place points
+        if (_waitingForLengthInput && _currentPoints.Count >= 2)
         {
             // Commit the current edit in the DataGrid (same as pressing Enter)
             dgSegments.CommitEdit();
@@ -699,11 +814,30 @@ public partial class MainWindow : Window
             return;
         }
 
-        var point = e.GetPosition(drawingCanvas);
-        var pt = new Point2D(point.X, point.Y);
+        // Get the canvas mouse position
+        var pt = GetCanvasMousePosition(e);
 
-        // First point - just add it
+        // Remove preview point and line since we're locking the position
+        if (_previewPoint != null)
+        {
+            drawingCanvas.Children.Remove(_previewPoint);
+            _previewPoint = null;
+        }
+        if (_previewLine != null)
+        {
+            drawingCanvas.Children.Remove(_previewLine);
+            _previewLine = null;
+        }
+
+        // Add the point
         _currentPoints.Add(pt);
+
+        // Draw the blue point at the clicked location
+        DrawPoint(pt, Brushes.Blue);
+
+        // Redraw all centerlines with rounded corners
+        RedrawCenterlines();
+
         UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
     }
 
@@ -731,60 +865,187 @@ public partial class MainWindow : Window
 
     private void LengthTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        // Update preview point and line position based on typed length
         if (!_waitingForLengthInput) return;
         if (_currentPoints.Count == 0) return;
 
         var textBox = sender as System.Windows.Controls.TextBox;
         if (textBox == null) return;
 
-        // Try to parse the current text
+        // Remove any existing preview polygon
+        if (_previewPolygon != null)
+        {
+            drawingCanvas.Children.Remove(_previewPolygon);
+            _previewPolygon = null;
+        }
+
+        // Try to parse the length value
         if (double.TryParse(textBox.Text, out double typedLength) && typedLength > 0)
         {
-            // Update the preview with the typed length
+            // Calculate new preview point position with the typed length
             var lastPoint = _currentPoints[_currentPoints.Count - 1];
-            var endPoint = new Point2D(
+            var previewEndPoint = new Point2D(
                 lastPoint.X + typedLength * Math.Cos(_pendingAngle),
                 lastPoint.Y + typedLength * Math.Sin(_pendingAngle)
             );
 
-            // Remove old preview polygon
-            if (_previewPolygon != null)
+            // Remove old preview point, line, and arc
+            if (_previewPoint != null)
             {
-                drawingCanvas.Children.Remove(_previewPolygon);
-                _previewPolygon = null;
+                drawingCanvas.Children.Remove(_previewPoint);
+            }
+            if (_previewLine != null)
+            {
+                drawingCanvas.Children.Remove(_previewLine);
+                _previewLine = null;
+            }
+            if (_previewArc != null)
+            {
+                drawingCanvas.Children.Remove(_previewArc);
+                _previewArc = null;
             }
 
-            // Draw new preview with typed length
-            const double busbarWidth = 10.0;
-            double halfWidth = busbarWidth / 2.0;
-            double perpX = -Math.Sin(_pendingAngle);
-            double perpY = Math.Cos(_pendingAngle);
+            // Calculate preview line start position (may be trimmed if there's a previous segment)
+            Point2D previewLineStart = lastPoint;
+            double minimumLength = 0;
 
-            Point2D p1 = new Point2D(lastPoint.X + perpX * halfWidth, lastPoint.Y + perpY * halfWidth);
-            Point2D p2 = new Point2D(lastPoint.X - perpX * halfWidth, lastPoint.Y - perpY * halfWidth);
-            Point2D p3 = new Point2D(endPoint.X - perpX * halfWidth, endPoint.Y - perpY * halfWidth);
-            Point2D p4 = new Point2D(endPoint.X + perpX * halfWidth, endPoint.Y + perpY * halfWidth);
-
-            _previewPolygon = new Polygon
+            if (_currentPoints.Count >= 2)
             {
-                Stroke = Brushes.Gray,
-                Fill = Brushes.Transparent,
-                StrokeThickness = 1,
-                StrokeDashArray = new DoubleCollection { 4, 2 },
-                IsHitTestVisible = false,
-                Points = new PointCollection
+                // Trim the start of the preview line to account for the bend radius
+                double thickness = _currentProject.MaterialSettings.Thickness;
+                double toolRadius = _currentProject.MaterialSettings.BendToolRadius;
+                double bendRadius = toolRadius + (thickness / 2.0);
+
+                var prevPoint = _currentPoints[_currentPoints.Count - 2];
+
+                // Calculate the minimum required length (trim distance)
+                // Direction vectors
+                double dx1 = lastPoint.X - prevPoint.X;
+                double dy1 = lastPoint.Y - prevPoint.Y;
+                double len1 = Math.Sqrt(dx1 * dx1 + dy1 * dy1);
+
+                double dx2 = previewEndPoint.X - lastPoint.X;
+                double dy2 = previewEndPoint.Y - lastPoint.Y;
+                double len2 = Math.Sqrt(dx2 * dx2 + dy2 * dy2);
+
+                if (len1 >= 0.01 && len2 >= 0.01)
                 {
-                    new System.Windows.Point(p1.X, p1.Y),
-                    new System.Windows.Point(p4.X, p4.Y),
-                    new System.Windows.Point(p3.X, p3.Y),
-                    new System.Windows.Point(p2.X, p2.Y)
+                    // Unit vectors
+                    double u1x = dx1 / len1;
+                    double u1y = dy1 / len1;
+                    double u2x = dx2 / len2;
+                    double u2y = dy2 / len2;
+
+                    // Calculate the angle between segments using dot product
+                    double dot = u1x * u2x + u1y * u2y;
+                    double angleRad = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot)));
+
+                    if (Math.Abs(angleRad) >= 0.001)
+                    {
+                        // Tangent length for the fillet
+                        minimumLength = bendRadius * Math.Tan(angleRad / 2.0);
+                    }
                 }
+
+                // If typed length is less than minimum required, don't show preview
+                if (typedLength < minimumLength)
+                {
+                    return;
+                }
+
+                previewLineStart = TrimLineStart(prevPoint, lastPoint, previewEndPoint, bendRadius);
+
+                // Temporarily redraw all confirmed segments with trimming for the preview
+                // Remove all existing lines and arcs (but keep the blue points)
+                for (int i = _currentShapes.Count - 1; i >= 0; i--)
+                {
+                    if (_currentShapes[i] is Line || _currentShapes[i] is System.Windows.Shapes.Path)
+                    {
+                        drawingCanvas.Children.Remove(_currentShapes[i]);
+                        _currentShapes.RemoveAt(i);
+                    }
+                }
+
+                // Redraw all confirmed segments with proper trimming considering the preview endpoint
+                for (int i = 0; i < _currentPoints.Count - 1; i++)
+                {
+                    var p1 = _currentPoints[i];
+                    var p2 = _currentPoints[i + 1];
+
+                    Point2D segStart = p1;
+                    Point2D segEnd = p2;
+
+                    // Trim start if there's a previous segment
+                    if (i > 0)
+                    {
+                        var p0 = _currentPoints[i - 1];
+                        segStart = TrimLineStart(p0, p1, p2, bendRadius);
+                    }
+
+                    // Trim end if this is the last confirmed segment (where we're adding the preview)
+                    if (i == _currentPoints.Count - 2)
+                    {
+                        // Use the preview endpoint to calculate the trim
+                        segEnd = TrimLineEnd(p1, p2, previewEndPoint, bendRadius);
+                    }
+                    else if (i < _currentPoints.Count - 2)
+                    {
+                        // There's a next confirmed segment
+                        var p3 = _currentPoints[i + 2];
+                        segEnd = TrimLineEnd(p1, p2, p3, bendRadius);
+                    }
+
+                    // Draw the segment
+                    var line = new Line
+                    {
+                        X1 = segStart.X,
+                        Y1 = segStart.Y,
+                        X2 = segEnd.X,
+                        Y2 = segEnd.Y,
+                        Stroke = Brushes.LightGray,
+                        StrokeThickness = 1
+                    };
+                    drawingCanvas.Children.Add(line);
+                    _currentShapes.Add(line);
+
+                    // Draw arc if there's a next segment
+                    if (i < _currentPoints.Count - 2)
+                    {
+                        var p3 = _currentPoints[i + 2];
+                        DrawBendArc(p1, p2, p3, bendRadius);
+                    }
+                }
+
+                // Draw preview arc at the previous bend point
+                DrawPreviewArc(prevPoint, lastPoint, previewEndPoint, bendRadius);
+            }
+
+            // Draw preview line from trimmed start to calculated end point
+            _previewLine = new Line
+            {
+                X1 = previewLineStart.X,
+                Y1 = previewLineStart.Y,
+                X2 = previewEndPoint.X,
+                Y2 = previewEndPoint.Y,
+                Stroke = Brushes.LightGray,
+                StrokeThickness = 1,
+                IsHitTestVisible = false
             };
+            drawingCanvas.Children.Add(_previewLine);
 
-            drawingCanvas.Children.Add(_previewPolygon);
-
-            // DON'T update DataGrid while typing - it causes focus loss
-            // The preview polygon is updated, which is enough visual feedback
+            // Draw new preview point at calculated position
+            _previewPoint = new Ellipse
+            {
+                Width = 2,
+                Height = 2,
+                Fill = Brushes.Blue,
+                Stroke = Brushes.Black,
+                StrokeThickness = 0.5,
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(_previewPoint, previewEndPoint.X - 1);
+            Canvas.SetTop(_previewPoint, previewEndPoint.Y - 1);
+            drawingCanvas.Children.Add(_previewPoint);
         }
     }
 
@@ -817,6 +1078,19 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Apply minimum length constraint of 50mm
+        const double minimumSegmentLength = 50.0;
+        bool wasForcedToMinimum = false;
+        if (desiredLength < minimumSegmentLength)
+        {
+            desiredLength = minimumSegmentLength;
+            wasForcedToMinimum = true;
+            UpdateStatusBar($"Length adjusted to minimum: {minimumSegmentLength}mm");
+        }
+
+        // Track if this segment was forced to minimum
+        _segmentsForcedToMinimum.Add(wasForcedToMinimum);
+
         // Calculate the new end point with the desired length
         var start = _currentPoints[_currentPoints.Count - 1];
         var pt = new Point2D(
@@ -826,21 +1100,33 @@ public partial class MainWindow : Window
 
         _currentPoints.Add(pt);
 
-        // Remove preview polygon
+        // Remove preview shapes
         if (_previewPolygon != null)
         {
             drawingCanvas.Children.Remove(_previewPolygon);
             _previewPolygon = null;
         }
+        if (_previewPoint != null)
+        {
+            drawingCanvas.Children.Remove(_previewPoint);
+            _previewPoint = null;
+        }
+        if (_previewLine != null)
+        {
+            drawingCanvas.Children.Remove(_previewLine);
+            _previewLine = null;
+        }
 
-        // Draw the segment
+        // Draw the end point at the new position (start point was already drawn on click)
+        DrawPoint(pt, Brushes.Blue);
+
+        // Redraw all centerlines with rounded corners
+        RedrawCenterlines();
+
+        // Calculate segment info for the list
         var lastIdx = _currentPoints.Count - 1;
         var segmentStart = _currentPoints[lastIdx - 1];
         var segmentEnd = _currentPoints[lastIdx];
-
-        DrawLine(segmentStart, segmentEnd, Brushes.Blue, 1);
-
-        // Calculate segment info for the list
         double segmentLength = segmentStart.DistanceTo(segmentEnd);
         double segmentAngle = 0;
 
@@ -911,19 +1197,51 @@ public partial class MainWindow : Window
             _previewPolygon = null;
         }
 
-        // Need at least one point to draw preview
-        if (_currentPoints.Count == 0) return;
+        // Get the canvas mouse position
+        var currentPt = GetCanvasMousePosition(e);
 
-        var point = e.GetPosition(drawingCanvas);
+        // Remove old preview point, line, and arc
+        if (_previewPoint != null)
+        {
+            drawingCanvas.Children.Remove(_previewPoint);
+        }
+        if (_previewLine != null)
+        {
+            drawingCanvas.Children.Remove(_previewLine);
+            _previewLine = null;
+        }
+        if (_previewArc != null)
+        {
+            drawingCanvas.Children.Remove(_previewArc);
+            _previewArc = null;
+        }
+
+        // Need at least one point to calculate preview position
+        if (_currentPoints.Count == 0)
+        {
+            // No points yet, show preview at cursor location
+            _previewPoint = new Ellipse
+            {
+                Width = 2,
+                Height = 2,
+                Fill = Brushes.Blue,
+                Stroke = Brushes.Black,
+                StrokeThickness = 0.5,
+                IsHitTestVisible = false  // Don't block mouse events
+            };
+            Canvas.SetLeft(_previewPoint, currentPt.X - 1);
+            Canvas.SetTop(_previewPoint, currentPt.Y - 1);
+            drawingCanvas.Children.Add(_previewPoint);
+            return;
+        }
+
         var lastPoint = _currentPoints[_currentPoints.Count - 1];
 
-        // Draw preview rectangle
-        const double busbarWidth = 10.0;
+        // Calculate preview measurements
         const double minLength = 50.0;  // Minimum segment length
-        double halfWidth = busbarWidth / 2.0;
 
-        double dx = point.X - lastPoint.X;
-        double dy = point.Y - lastPoint.Y;
+        double dx = currentPt.X - lastPoint.X;
+        double dy = currentPt.Y - lastPoint.Y;
         double length = Math.Sqrt(dx * dx + dy * dy);
 
         if (length < 0.1) return; // Too short to draw
@@ -948,38 +1266,114 @@ public partial class MainWindow : Window
         // Store the pending angle for when user confirms
         _pendingAngle = angle;
 
-        // Recalculate perpendicular based on normalized direction
-        double perpX = -Math.Sin(angle);
-        double perpY = Math.Cos(angle);
-
-        // Calculate the 4 corner points
-        Point2D p1 = new Point2D(lastPoint.X + perpX * halfWidth, lastPoint.Y + perpY * halfWidth);
-        Point2D p2 = new Point2D(lastPoint.X - perpX * halfWidth, lastPoint.Y - perpY * halfWidth);
-        Point2D p3 = new Point2D(endPoint.X - perpX * halfWidth, endPoint.Y - perpY * halfWidth);
-        Point2D p4 = new Point2D(endPoint.X + perpX * halfWidth, endPoint.Y + perpY * halfWidth);
-
-        _previewPolygon = new Polygon
+        // Calculate preview line start position (may be trimmed if there's a previous segment)
+        Point2D previewLineStart = lastPoint;
+        if (_currentPoints.Count >= 2)
         {
-            Stroke = Brushes.Gray,
-            Fill = Brushes.Transparent,
-            StrokeThickness = 1,
-            StrokeDashArray = new DoubleCollection { 4, 2 },
-            IsHitTestVisible = false,  // Don't block mouse events!
-            Points = new PointCollection
+            // Trim the start of the preview line to account for the bend radius
+            double thickness = _currentProject.MaterialSettings.Thickness;
+            double toolRadius = _currentProject.MaterialSettings.BendToolRadius;
+            double bendRadius = toolRadius + (thickness / 2.0);
+
+            var prevPoint = _currentPoints[_currentPoints.Count - 2];
+            previewLineStart = TrimLineStart(prevPoint, lastPoint, endPoint, bendRadius);
+
+            // Temporarily redraw all confirmed segments with trimming for the preview
+            // Remove all existing lines and arcs (but keep the blue points)
+            for (int i = _currentShapes.Count - 1; i >= 0; i--)
             {
-                new System.Windows.Point(p1.X, p1.Y),
-                new System.Windows.Point(p4.X, p4.Y),
-                new System.Windows.Point(p3.X, p3.Y),
-                new System.Windows.Point(p2.X, p2.Y)
+                if (_currentShapes[i] is Line || _currentShapes[i] is System.Windows.Shapes.Path)
+                {
+                    drawingCanvas.Children.Remove(_currentShapes[i]);
+                    _currentShapes.RemoveAt(i);
+                }
             }
+
+            // Redraw all confirmed segments with proper trimming considering the preview endpoint
+            for (int i = 0; i < _currentPoints.Count - 1; i++)
+            {
+                var p1 = _currentPoints[i];
+                var p2 = _currentPoints[i + 1];
+
+                Point2D segStart = p1;
+                Point2D segEnd = p2;
+
+                // Trim start if there's a previous segment
+                if (i > 0)
+                {
+                    var p0 = _currentPoints[i - 1];
+                    segStart = TrimLineStart(p0, p1, p2, bendRadius);
+                }
+
+                // Trim end if this is the last confirmed segment (where we're adding the preview)
+                if (i == _currentPoints.Count - 2)
+                {
+                    // Use the preview endpoint to calculate the trim
+                    segEnd = TrimLineEnd(p1, p2, endPoint, bendRadius);
+                }
+                else if (i < _currentPoints.Count - 2)
+                {
+                    // There's a next confirmed segment
+                    var p3 = _currentPoints[i + 2];
+                    segEnd = TrimLineEnd(p1, p2, p3, bendRadius);
+                }
+
+                // Draw the segment
+                var line = new Line
+                {
+                    X1 = segStart.X,
+                    Y1 = segStart.Y,
+                    X2 = segEnd.X,
+                    Y2 = segEnd.Y,
+                    Stroke = Brushes.LightGray,
+                    StrokeThickness = 1
+                };
+                drawingCanvas.Children.Add(line);
+                _currentShapes.Add(line);
+
+                // Draw arc if there's a next segment
+                if (i < _currentPoints.Count - 2)
+                {
+                    var p3 = _currentPoints[i + 2];
+                    DrawBendArc(p1, p2, p3, bendRadius);
+                }
+            }
+
+            // Draw preview arc at the previous bend point
+            DrawPreviewArc(prevPoint, lastPoint, endPoint, bendRadius);
+        }
+
+        // Draw preview line from trimmed start to calculated end point
+        _previewLine = new Line
+        {
+            X1 = previewLineStart.X,
+            Y1 = previewLineStart.Y,
+            X2 = endPoint.X,
+            Y2 = endPoint.Y,
+            Stroke = Brushes.LightGray,
+            StrokeThickness = 1,
+            IsHitTestVisible = false
         };
+        drawingCanvas.Children.Add(_previewLine);
 
-        drawingCanvas.Children.Add(_previewPolygon);
+        // Draw preview point at the snapped/calculated position
+        _previewPoint = new Ellipse
+        {
+            Width = 2,
+            Height = 2,
+            Fill = Brushes.Blue,
+            Stroke = Brushes.Black,
+            StrokeThickness = 0.5,
+            IsHitTestVisible = false  // Don't block mouse events
+        };
+        Canvas.SetLeft(_previewPoint, endPoint.X - 1);
+        Canvas.SetTop(_previewPoint, endPoint.Y - 1);
+        drawingCanvas.Children.Add(_previewPoint);
 
-        // Update the right panel with live preview measurements
+        // Update measurements in DataGrid (no visual preview)
         UpdateLivePreviewMeasurements(lastPoint, endPoint);
 
-        // After first point, start/restart timer to detect when mouse stops
+        // After first point is placed, start/restart timer to detect when mouse stops
         if (_currentPoints.Count >= 1)
         {
             if (!_waitingForLengthInput)
@@ -1183,50 +1577,348 @@ public partial class MainWindow : Window
         _translateTransform.Y = (canvasHeight - totalHeight * scale) / 2 - (busbarTop * scale);
     }
 
-    private void DrawLine(Point2D start, Point2D end, System.Windows.Media.Brush color, double thickness)
+    private void DrawPoint(Point2D point, System.Windows.Media.Brush color, double radius = 1)
     {
-        // Draw a simple rectangle representing the busbar segment
-        const double busbarWidth = 10.0;
-        double halfWidth = busbarWidth / 2.0;
-
-        // Calculate direction and perpendicular
-        double dx = end.X - start.X;
-        double dy = end.Y - start.Y;
-        double length = Math.Sqrt(dx * dx + dy * dy);
-
-        if (length == 0) return;
-
-        double perpX = -dy / length;
-        double perpY = dx / length;
-
-        // Calculate the 4 corner points of the rectangle
-        Point2D p1 = new Point2D(start.X + perpX * halfWidth, start.Y + perpY * halfWidth);
-        Point2D p2 = new Point2D(start.X - perpX * halfWidth, start.Y - perpY * halfWidth);
-        Point2D p3 = new Point2D(end.X - perpX * halfWidth, end.Y - perpY * halfWidth);
-        Point2D p4 = new Point2D(end.X + perpX * halfWidth, end.Y + perpY * halfWidth);
-
-        // Create a polygon for the rectangle
-        var polygon = new Polygon
+        // Draw a simple circle at the point location
+        var ellipse = new Ellipse
         {
-            Stroke = color,
-            Fill = Brushes.Transparent,
-            StrokeThickness = 1,
-            Points = new PointCollection
-            {
-                new System.Windows.Point(p1.X, p1.Y),
-                new System.Windows.Point(p4.X, p4.Y),
-                new System.Windows.Point(p3.X, p3.Y),
-                new System.Windows.Point(p2.X, p2.Y)
-            }
+            Width = radius * 2,
+            Height = radius * 2,
+            Fill = color,
+            Stroke = Brushes.Black,
+            StrokeThickness = 0.5
         };
 
-        drawingCanvas.Children.Add(polygon);
+        // Position the ellipse so its center is at the point
+        Canvas.SetLeft(ellipse, point.X - radius);
+        Canvas.SetTop(ellipse, point.Y - radius);
+
+        drawingCanvas.Children.Add(ellipse);
 
         // Track shape if we're currently drawing
         if (_isDrawing)
         {
-            _currentShapes.Add(polygon);
+            _currentShapes.Add(ellipse);
         }
+    }
+
+    private void RedrawCenterlines()
+    {
+        // Remove all existing centerline shapes (lines and arcs)
+        // Keep only the blue points
+        for (int i = _currentShapes.Count - 1; i >= 0; i--)
+        {
+            if (_currentShapes[i] is Line || _currentShapes[i] is System.Windows.Shapes.Path)
+            {
+                drawingCanvas.Children.Remove(_currentShapes[i]);
+                _currentShapes.RemoveAt(i);
+            }
+        }
+
+        if (_currentPoints.Count < 2) return;
+
+        // Get bend radius from material settings
+        double thickness = _currentProject.MaterialSettings.Thickness;
+        double toolRadius = _currentProject.MaterialSettings.BendToolRadius;
+        double bendRadius = toolRadius + (thickness / 2.0);
+
+        // Draw centerlines with rounded corners
+        for (int i = 0; i < _currentPoints.Count - 1; i++)
+        {
+            var p1 = _currentPoints[i];
+            var p2 = _currentPoints[i + 1];
+
+            Point2D lineStart = p1;
+            Point2D lineEnd = p2;
+
+            // Check if there's a previous segment (for start trim)
+            if (i > 0)
+            {
+                var p0 = _currentPoints[i - 1];
+                lineStart = TrimLineStart(p0, p1, p2, bendRadius);
+            }
+
+            // Check if there's a next segment (for end trim)
+            if (i < _currentPoints.Count - 2)
+            {
+                var p3 = _currentPoints[i + 2];
+                lineEnd = TrimLineEnd(p1, p2, p3, bendRadius);
+            }
+
+            // Draw the trimmed line segment
+            var line = new Line
+            {
+                X1 = lineStart.X,
+                Y1 = lineStart.Y,
+                X2 = lineEnd.X,
+                Y2 = lineEnd.Y,
+                Stroke = Brushes.LightGray,
+                StrokeThickness = 1
+            };
+            drawingCanvas.Children.Add(line);
+            _currentShapes.Add(line);
+
+            // Draw arc at the end if there's a next segment
+            if (i < _currentPoints.Count - 2)
+            {
+                var p3 = _currentPoints[i + 2];
+                DrawBendArc(p1, p2, p3, bendRadius);
+            }
+        }
+    }
+
+    private Point2D TrimLineStart(Point2D p0, Point2D p1, Point2D p2, double radius)
+    {
+        // Calculate the trim distance based on the bend angle
+        // For a fillet, the tangent length = radius * tan(angle/2)
+
+        // Direction vectors
+        double dx1 = p1.X - p0.X;
+        double dy1 = p1.Y - p0.Y;
+        double len1 = Math.Sqrt(dx1 * dx1 + dy1 * dy1);
+
+        double dx2 = p2.X - p1.X;
+        double dy2 = p2.Y - p1.Y;
+        double len2 = Math.Sqrt(dx2 * dx2 + dy2 * dy2);
+
+        if (len1 < 0.01 || len2 < 0.01) return p1;
+
+        // Unit vectors
+        double u1x = dx1 / len1;
+        double u1y = dy1 / len1;
+        double u2x = dx2 / len2;
+        double u2y = dy2 / len2;
+
+        // Calculate the angle between segments using dot product
+        double dot = u1x * u2x + u1y * u2y;
+        double angleRad = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))); // Clamp to avoid numerical errors
+
+        if (Math.Abs(angleRad) < 0.001) return p1; // Nearly straight, no trim needed
+
+        // Tangent length for the fillet
+        double trimDistance = radius * Math.Tan(angleRad / 2.0);
+
+        if (len2 < trimDistance) return p1; // Segment too short to trim
+
+        // Unit vector from p1 to p2
+        double ux = dx2 / len2;
+        double uy = dy2 / len2;
+
+        // Trim by calculated distance
+        return new Point2D(p1.X + ux * trimDistance, p1.Y + uy * trimDistance);
+    }
+
+    private Point2D TrimLineEnd(Point2D p1, Point2D p2, Point2D p3, double radius)
+    {
+        // Calculate the trim distance based on the bend angle
+        // For a fillet, the tangent length = radius * tan(angle/2)
+
+        // Direction vectors
+        double dx1 = p2.X - p1.X;
+        double dy1 = p2.Y - p1.Y;
+        double len1 = Math.Sqrt(dx1 * dx1 + dy1 * dy1);
+
+        double dx2 = p3.X - p2.X;
+        double dy2 = p3.Y - p2.Y;
+        double len2 = Math.Sqrt(dx2 * dx2 + dy2 * dy2);
+
+        if (len1 < 0.01 || len2 < 0.01) return p2;
+
+        // Unit vectors
+        double u1x = dx1 / len1;
+        double u1y = dy1 / len1;
+        double u2x = dx2 / len2;
+        double u2y = dy2 / len2;
+
+        // Calculate the angle between segments using dot product
+        double dot = u1x * u2x + u1y * u2y;
+        double angleRad = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))); // Clamp to avoid numerical errors
+
+        if (Math.Abs(angleRad) < 0.001) return p2; // Nearly straight, no trim needed
+
+        // Tangent length for the fillet
+        double trimDistance = radius * Math.Tan(angleRad / 2.0);
+
+        if (len1 < trimDistance) return p2; // Segment too short to trim
+
+        // Unit vector from p1 to p2
+        double ux = dx1 / len1;
+        double uy = dy1 / len1;
+
+        // Trim by calculated distance from the end
+        return new Point2D(p2.X - ux * trimDistance, p2.Y - uy * trimDistance);
+    }
+
+    private void DrawPreviewArc(Point2D p1, Point2D p2, Point2D p3, double radius)
+    {
+        // Draw a preview arc at the bend point (same as DrawBendArc but stores in _previewArc)
+        // p1 -> p2 is the previous segment
+        // p2 -> p3 is the preview segment
+
+        // Direction vectors
+        double dx1 = p2.X - p1.X;
+        double dy1 = p2.Y - p1.Y;
+        double len1 = Math.Sqrt(dx1 * dx1 + dy1 * dy1);
+
+        double dx2 = p3.X - p2.X;
+        double dy2 = p3.Y - p2.Y;
+        double len2 = Math.Sqrt(dx2 * dx2 + dy2 * dy2);
+
+        if (len1 < 0.01 || len2 < 0.01) return;
+
+        // Unit vectors
+        double u1x = dx1 / len1;
+        double u1y = dy1 / len1;
+        double u2x = dx2 / len2;
+        double u2y = dy2 / len2;
+
+        // Calculate the angle between segments using dot product
+        double dot = u1x * u2x + u1y * u2y;
+        double angleRad = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))); // Clamp to avoid numerical errors
+
+        if (Math.Abs(angleRad) < 0.001) return; // Nearly straight, no arc needed
+
+        // Tangent length for the fillet - this is how far back from p2 the arc starts/ends
+        double trimDistance = radius * Math.Tan(angleRad / 2.0);
+
+        // Arc start point (end of trimmed first segment)
+        Point2D arcStart = new Point2D(p2.X - u1x * trimDistance, p2.Y - u1y * trimDistance);
+
+        // Arc end point (start of trimmed second segment)
+        Point2D arcEnd = new Point2D(p2.X + u2x * trimDistance, p2.Y + u2y * trimDistance);
+
+        // Determine if this is a left or right turn using cross product
+        double cross = u1x * u2y - u1y * u2x;
+        bool isLargeArc = false;
+        bool sweepDirection = cross > 0; // true = clockwise, false = counterclockwise
+
+        // Create arc using PathGeometry
+        var pathFigure = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(arcStart.X, arcStart.Y)
+        };
+
+        var arcSegment = new ArcSegment
+        {
+            Point = new System.Windows.Point(arcEnd.X, arcEnd.Y),
+            Size = new System.Windows.Size(radius, radius),
+            SweepDirection = sweepDirection ? SweepDirection.Clockwise : SweepDirection.Counterclockwise,
+            IsLargeArc = isLargeArc
+        };
+
+        pathFigure.Segments.Add(arcSegment);
+
+        var pathGeometry = new PathGeometry();
+        pathGeometry.Figures.Add(pathFigure);
+
+        _previewArc = new System.Windows.Shapes.Path
+        {
+            Data = pathGeometry,
+            Stroke = Brushes.LightGray,
+            StrokeThickness = 1,
+            IsHitTestVisible = false
+        };
+
+        drawingCanvas.Children.Add(_previewArc);
+    }
+
+    private void DrawBendArc(Point2D p1, Point2D p2, Point2D p3, double radius)
+    {
+        // Calculate the arc that connects the two line segments
+        // p1 -> p2 is the previous segment
+        // p2 -> p3 is the next segment
+
+        // Direction vectors
+        double dx1 = p2.X - p1.X;
+        double dy1 = p2.Y - p1.Y;
+        double len1 = Math.Sqrt(dx1 * dx1 + dy1 * dy1);
+
+        double dx2 = p3.X - p2.X;
+        double dy2 = p3.Y - p2.Y;
+        double len2 = Math.Sqrt(dx2 * dx2 + dy2 * dy2);
+
+        if (len1 < 0.01 || len2 < 0.01) return;
+
+        // Unit vectors
+        double u1x = dx1 / len1;
+        double u1y = dy1 / len1;
+        double u2x = dx2 / len2;
+        double u2y = dy2 / len2;
+
+        // Calculate the angle between segments using dot product
+        double dot = u1x * u2x + u1y * u2y;
+        double angleRad = Math.Acos(Math.Max(-1.0, Math.Min(1.0, dot))); // Clamp to avoid numerical errors
+
+        if (Math.Abs(angleRad) < 0.001) return; // Nearly straight, no arc needed
+
+        // Tangent length for the fillet - this is how far back from p2 the arc starts/ends
+        double trimDistance = radius * Math.Tan(angleRad / 2.0);
+
+        // Arc start point (end of trimmed first segment)
+        Point2D arcStart = new Point2D(p2.X - u1x * trimDistance, p2.Y - u1y * trimDistance);
+
+        // Arc end point (start of trimmed second segment)
+        Point2D arcEnd = new Point2D(p2.X + u2x * trimDistance, p2.Y + u2y * trimDistance);
+
+        // Determine if this is a left or right turn using cross product
+        double cross = u1x * u2y - u1y * u2x;
+        bool isLargeArc = false;
+        bool sweepDirection = cross > 0; // true = clockwise, false = counterclockwise
+
+        // Create arc using PathGeometry
+        var pathFigure = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(arcStart.X, arcStart.Y)
+        };
+
+        var arcSegment = new ArcSegment
+        {
+            Point = new System.Windows.Point(arcEnd.X, arcEnd.Y),
+            Size = new System.Windows.Size(radius, radius),
+            SweepDirection = sweepDirection ? SweepDirection.Clockwise : SweepDirection.Counterclockwise,
+            IsLargeArc = isLargeArc
+        };
+
+        pathFigure.Segments.Add(arcSegment);
+
+        var pathGeometry = new PathGeometry();
+        pathGeometry.Figures.Add(pathFigure);
+
+        var path = new System.Windows.Shapes.Path
+        {
+            Data = pathGeometry,
+            Stroke = Brushes.LightGray,
+            StrokeThickness = 1
+        };
+
+        drawingCanvas.Children.Add(path);
+        _currentShapes.Add(path);
+    }
+
+    private void DrawLine(Point2D start, Point2D end, System.Windows.Media.Brush color, double thickness)
+    {
+        // This method is no longer used for centerlines during drawing
+        // It's kept for compatibility with RedrawCanvas for finished busbars
+        var line = new Line
+        {
+            X1 = start.X,
+            Y1 = start.Y,
+            X2 = end.X,
+            Y2 = end.Y,
+            Stroke = Brushes.LightGray,
+            StrokeThickness = 1
+        };
+
+        drawingCanvas.Children.Add(line);
+
+        // Track shape if we're currently drawing
+        if (_isDrawing)
+        {
+            _currentShapes.Add(line);
+        }
+
+        // Draw the end point (start point already exists from previous segment)
+        DrawPoint(end, color);
     }
 
     private void RedrawCanvas()

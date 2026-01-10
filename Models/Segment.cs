@@ -14,6 +14,7 @@ namespace BusbarCAD.Models
         public double InsideLength { get; set; }
         public double Angle { get; set; } // Direction angle in degrees
         public SegmentType Type { get; set; }
+        public bool WasForcedToMinimum { get; set; } // Track if length was forced to minimum
 
         public Segment(Point2D start, Point2D end, double insideLength)
         {

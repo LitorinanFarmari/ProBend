@@ -137,26 +137,25 @@
 
             <!-- Canvas Area -->
             <Border Grid.Column="1" Background="White" ClipToBounds="True">
-                <Grid ClipToBounds="True">
-                    <Canvas Name="drawingCanvas"
-                            Background="White"
-                            ClipToBounds="True"
-                            MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
-                            MouseMove="Canvas_MouseMove"
-                            MouseRightButtonDown="Canvas_MouseRightButtonDown">
-                        <!-- Grid background (optional) -->
-                    </Canvas>
+                <Canvas Name="drawingCanvas"
+                        Background="White"
+                        ClipToBounds="True"
+                        MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
+                        MouseMove="Canvas_MouseMove"
+                        MouseRightButtonDown="Canvas_MouseRightButtonDown"
+                        SizeChanged="DrawingCanvas_SizeChanged">
+                    <!-- Grid background (optional) -->
 
                     <!-- Instruction overlay when no busbars -->
                     <TextBlock Name="txtInstructions"
                                Text="Click 'Draw' button or press 'D' to start drawing a busbar.&#x0a;Click points to create segments. Right-click or press ESC to finish."
-                               HorizontalAlignment="Center"
-                               VerticalAlignment="Center"
+                               Canvas.Left="0"
+                               Canvas.Top="0"
                                FontSize="16"
                                Foreground="#999999"
                                TextAlignment="Center"
                                IsHitTestVisible="False"/>
-                </Grid>
+                </Canvas>
             </Border>
 
             <!-- Segment List Panel -->

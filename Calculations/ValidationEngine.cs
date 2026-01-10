@@ -6,17 +6,24 @@ namespace BusbarCAD.Calculations
     {
         public bool IsValid { get; set; }
         public List<string> Errors { get; set; }
+        public List<string> Warnings { get; set; }
 
         public ValidationResult()
         {
             IsValid = true;
             Errors = new List<string>();
+            Warnings = new List<string>();
         }
 
         public void AddError(string error)
         {
             IsValid = false;
             Errors.Add(error);
+        }
+
+        public void AddWarning(string warning)
+        {
+            Warnings.Add(warning);
         }
     }
 
@@ -87,12 +94,26 @@ namespace BusbarCAD.Calculations
             // Rule 1: Both ends must be ≥ 50mm (absolute minimum)
             if (firstSegment.InsideLength < ABSOLUTE_MIN_END)
             {
-                result.AddError($"First segment ({firstSegment.InsideLength:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
+                if (firstSegment.WasForcedToMinimum)
+                {
+                    result.AddWarning($"First segment length forced to minimum (50mm)");
+                }
+                else
+                {
+                    result.AddError($"First segment ({firstSegment.InsideLength:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
+                }
             }
 
             if (lastSegment.InsideLength < ABSOLUTE_MIN_END)
             {
-                result.AddError($"Last segment ({lastSegment.InsideLength:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
+                if (lastSegment.WasForcedToMinimum)
+                {
+                    result.AddWarning($"Last segment length forced to minimum (50mm)");
+                }
+                else
+                {
+                    result.AddError($"Last segment ({lastSegment.InsideLength:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
+                }
             }
 
             // Rule 2: At least one end must be ≥ 70mm
@@ -101,8 +122,16 @@ namespace BusbarCAD.Calculations
 
             if (!firstIsPreferred && !lastIsPreferred)
             {
-                result.AddError($"Neither end segment meets preferred minimum ({PREFERRED_MIN_END}mm). " +
-                              $"First: {firstSegment.InsideLength:F1}mm, Last: {lastSegment.InsideLength:F1}mm");
+                if (firstSegment.WasForcedToMinimum || lastSegment.WasForcedToMinimum)
+                {
+                    result.AddWarning($"Neither end segment meets preferred minimum ({PREFERRED_MIN_END}mm). " +
+                                    $"First: {firstSegment.InsideLength:F1}mm, Last: {lastSegment.InsideLength:F1}mm");
+                }
+                else
+                {
+                    result.AddError($"Neither end segment meets preferred minimum ({PREFERRED_MIN_END}mm). " +
+                                  $"First: {firstSegment.InsideLength:F1}mm, Last: {lastSegment.InsideLength:F1}mm");
+                }
             }
 
             return result;
@@ -124,7 +153,14 @@ namespace BusbarCAD.Calculations
                 var segment = busbar.Segments[i];
                 if (segment.InsideLength < MIN_MIDDLE)
                 {
-                    result.AddError($"Middle segment {i} ({segment.InsideLength:F1}mm) is below minimum ({MIN_MIDDLE}mm)");
+                    if (segment.WasForcedToMinimum)
+                    {
+                        result.AddWarning($"Segment {i + 1} length forced to minimum (50mm)");
+                    }
+                    else
+                    {
+                        result.AddError($"Middle segment {i} ({segment.InsideLength:F1}mm) is below minimum ({MIN_MIDDLE}mm)");
+                    }
                 }
             }
 
