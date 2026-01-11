@@ -140,6 +140,7 @@
                 <Canvas Name="drawingCanvas"
                         Background="White"
                         ClipToBounds="True"
+                        Focusable="True"
                         MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
                         MouseMove="Canvas_MouseMove"
                         MouseRightButtonDown="Canvas_MouseRightButtonDown"

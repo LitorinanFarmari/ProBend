@@ -435,6 +435,14 @@ public partial class MainWindow : Window
         lstBusbars.SelectedIndex = -1;
 
         txtInstructions.Visibility = Visibility.Collapsed;
+
+        // Disable Tab navigation during drawing to prevent focus changes
+        KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.None);
+        KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.None);
+
+        // Set focus to canvas to ensure mouse events work properly
+        drawingCanvas.Focus();
+
         UpdateStatusBar("Drawing mode: Click to add points. Right-click or ESC to finish.");
     }
 
@@ -558,6 +566,10 @@ public partial class MainWindow : Window
         _currentSegments.Clear();
         _currentShapes.Clear();
         _segmentsForcedToMinimum.Clear();
+
+        // Re-enable Tab navigation after drawing ends
+        KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.Continue);
+        KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.Continue);
 
         // Keep the busbar selected in the list
         int finishedBusbarIndex = _currentBusbarIndex;
@@ -700,6 +712,11 @@ public partial class MainWindow : Window
         _isDrawing = false;
         _currentPoints.Clear();
         _segmentsForcedToMinimum.Clear();
+
+        // Re-enable Tab navigation after drawing is cancelled
+        KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.Continue);
+        KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.Continue);
+
         if (_previewPolygon != null)
         {
             drawingCanvas.Children.Remove(_previewPolygon);
@@ -816,6 +833,25 @@ public partial class MainWindow : Window
 
         // Get the canvas mouse position
         var pt = GetCanvasMousePosition(e);
+
+        // Apply angle snapping if we have at least one existing point
+        if (_currentPoints.Count >= 1)
+        {
+            var lastPoint = _currentPoints[_currentPoints.Count - 1];
+            double dx = pt.X - lastPoint.X;
+            double dy = pt.Y - lastPoint.Y;
+            double length = Math.Sqrt(dx * dx + dy * dy);
+            double angle = Math.Atan2(dy, dx);
+
+            // Snap the angle
+            angle = SnapAngle(angle);
+
+            // Recalculate the point position with snapped angle
+            pt = new Point2D(
+                lastPoint.X + length * Math.Cos(angle),
+                lastPoint.Y + length * Math.Sin(angle)
+            );
+        }
 
         // Remove preview point and line since we're locking the position
         if (_previewPoint != null)
@@ -1945,6 +1981,12 @@ public partial class MainWindow : Window
         if (e.Key == Key.D && !_isDrawing)
         {
             StartDrawing();
+        }
+        else if (e.Key == Key.Tab && _isDrawing && !_waitingForLengthInput)
+        {
+            // Prevent Tab from changing focus during drawing mode (unless editing in DataGrid)
+            e.Handled = true;
+            drawingCanvas.Focus();
         }
         else if (e.Key == Key.Escape && _isDrawing)
         {
