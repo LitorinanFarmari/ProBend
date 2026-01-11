@@ -60,6 +60,12 @@ public partial class MainWindow : Window
     private System.Windows.Shapes.Path? _previewArc = null; // Preview arc at the previous bend
     private List<Shape> _previewMarkers = new List<Shape>(); // Preview perpendicular markers and edge arcs
     private List<bool> _segmentsForcedToMinimum = new List<bool>(); // Track which segments were forced to minimum length
+    private Line? _snapReferenceLine = null; // Reference snap line at the start of first busbar
+    private List<Ellipse> _snapReferencePoints = new List<Ellipse>(); // Snap points along the reference line
+    private Line? _snapReferenceLineEnd = null; // Reference snap line at the end of first busbar
+    private List<Ellipse> _snapReferencePointsEnd = new List<Ellipse>(); // Snap points along the end reference line
+    private List<Line> _snapReferenceLinesCorners = new List<Line>(); // Reference snap lines at corners (bends)
+    private List<Ellipse> _snapReferencePointsCorners = new List<Ellipse>(); // Snap points along corner reference lines
 
     public MainWindow()
     {
@@ -437,6 +443,9 @@ public partial class MainWindow : Window
 
         txtInstructions.Visibility = Visibility.Collapsed;
 
+        // Show snap reference line if there's an existing busbar
+        ShowSnapReferenceLine();
+
         // Disable Tab navigation during drawing to prevent focus changes
         KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.None);
         KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.None);
@@ -603,6 +612,9 @@ public partial class MainWindow : Window
         }
         _previewMarkers.Clear();
 
+        // Hide snap reference line
+        HideSnapReferenceLine();
+
         // Select the finished busbar in the ListBox
         if (finishedBusbarIndex >= 0 && finishedBusbarIndex < lstBusbars.Items.Count)
         {
@@ -748,6 +760,10 @@ public partial class MainWindow : Window
             drawingCanvas.Children.Remove(marker);
         }
         _previewMarkers.Clear();
+
+        // Hide snap reference line
+        HideSnapReferenceLine();
+
         UpdateStatusBar("Drawing cancelled");
     }
 
@@ -768,16 +784,13 @@ public partial class MainWindow : Window
 
         // Limit angle to ±90 degrees (limit angle between consecutive segments)
         // We need to calculate the relative angle from the previous segment
-        if (_currentPoints.Count >= 1)
+        // Only apply this restriction when we have at least 2 points (i.e., one completed segment)
+        if (_currentPoints.Count >= 2)
         {
-            // Get the angle of the previous segment (if it exists)
-            double prevAngleRad = 0;
-            if (_currentPoints.Count >= 2)
-            {
-                var prevStart = _currentPoints[_currentPoints.Count - 2];
-                var prevEnd = _currentPoints[_currentPoints.Count - 1];
-                prevAngleRad = Math.Atan2(prevEnd.Y - prevStart.Y, prevEnd.X - prevStart.X);
-            }
+            // Get the angle of the previous segment
+            var prevStart = _currentPoints[_currentPoints.Count - 2];
+            var prevEnd = _currentPoints[_currentPoints.Count - 1];
+            double prevAngleRad = Math.Atan2(prevEnd.Y - prevStart.Y, prevEnd.X - prevStart.X);
 
             // Calculate relative angle between segments
             double relativeAngleRad = angle - prevAngleRad;
@@ -845,8 +858,34 @@ public partial class MainWindow : Window
         // Get the canvas mouse position
         var pt = GetCanvasMousePosition(e);
 
-        // Apply angle snapping if we have at least one existing point
-        if (_currentPoints.Count >= 1)
+        // Remove preview point and line since we're locking the position
+        if (_previewPoint != null)
+        {
+            drawingCanvas.Children.Remove(_previewPoint);
+            _previewPoint = null;
+        }
+        if (_previewLine != null)
+        {
+            drawingCanvas.Children.Remove(_previewLine);
+            _previewLine = null;
+        }
+
+        // Check if cursor is near reference line snap point (priority check)
+        bool isSnappedToReferenceLine = false;
+        if (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0)
+        {
+            Point2D snappedPos = SnapToReferenceLine(pt);
+            // Only snap if cursor is within snapping distance (10mm)
+            double snapDistance = pt.DistanceTo(snappedPos);
+            if (snapDistance <= 10.0)
+            {
+                pt = snappedPos;
+                isSnappedToReferenceLine = true;
+            }
+        }
+
+        // Apply angle snapping if we have at least one existing point AND not snapped to reference line
+        if (_currentPoints.Count >= 1 && !isSnappedToReferenceLine)
         {
             var lastPoint = _currentPoints[_currentPoints.Count - 1];
             double dx = pt.X - lastPoint.X;
@@ -862,18 +901,6 @@ public partial class MainWindow : Window
                 lastPoint.X + length * Math.Cos(angle),
                 lastPoint.Y + length * Math.Sin(angle)
             );
-        }
-
-        // Remove preview point and line since we're locking the position
-        if (_previewPoint != null)
-        {
-            drawingCanvas.Children.Remove(_previewPoint);
-            _previewPoint = null;
-        }
-        if (_previewLine != null)
-        {
-            drawingCanvas.Children.Remove(_previewLine);
-            _previewLine = null;
         }
 
         // Add the point
@@ -1323,10 +1350,26 @@ public partial class MainWindow : Window
         }
         _previewMarkers.Clear();
 
+        // Update which reference line is visible based on cursor proximity
+        UpdateReferenceLineVisibility(currentPt);
+
+        // Snap to reference line if it exists and cursor is close to it
+        Point2D snappedCursor = currentPt;
+        if (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0)
+        {
+            Point2D snappedPos = SnapToReferenceLine(currentPt);
+            // Check if cursor is within snapping distance (10mm)
+            double snapDistance = currentPt.DistanceTo(snappedPos);
+            if (snapDistance <= 10.0)
+            {
+                snappedCursor = snappedPos;
+            }
+        }
+
         // Need at least one point to calculate preview position
         if (_currentPoints.Count == 0)
         {
-            // No points yet, show preview at cursor location
+            // No points yet, show preview at cursor location (or snapped location)
             _previewPoint = new Ellipse
             {
                 Width = 2,
@@ -1336,8 +1379,8 @@ public partial class MainWindow : Window
                 StrokeThickness = 0.5,
                 IsHitTestVisible = false  // Don't block mouse events
             };
-            Canvas.SetLeft(_previewPoint, currentPt.X - 1);
-            Canvas.SetTop(_previewPoint, currentPt.Y - 1);
+            Canvas.SetLeft(_previewPoint, snappedCursor.X - 1);
+            Canvas.SetTop(_previewPoint, snappedCursor.Y - 1);
             drawingCanvas.Children.Add(_previewPoint);
             return;
         }
@@ -1347,8 +1390,20 @@ public partial class MainWindow : Window
         // Calculate preview measurements
         const double minLength = 50.0;  // Minimum segment length
 
-        double dx = currentPt.X - lastPoint.X;
-        double dy = currentPt.Y - lastPoint.Y;
+        // Check if cursor is snapped to reference line
+        bool isSnappedToReferenceLine = false;
+        if (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0)
+        {
+            Point2D refSnappedPos = SnapToReferenceLine(currentPt);
+            double refSnapDistance = currentPt.DistanceTo(refSnappedPos);
+            if (refSnapDistance <= 10.0)
+            {
+                isSnappedToReferenceLine = true;
+            }
+        }
+
+        double dx = snappedCursor.X - lastPoint.X;
+        double dy = snappedCursor.Y - lastPoint.Y;
         double length = Math.Sqrt(dx * dx + dy * dy);
 
         if (length < 0.1) return; // Too short to draw
@@ -1362,8 +1417,12 @@ public partial class MainWindow : Window
         // Normalize direction and apply length
         double angle = Math.Atan2(dy, dx);
 
-        // Snap to horizontal or vertical if within 10 degrees
-        angle = SnapAngle(angle);
+        // Only apply horizontal/vertical angle snapping if NOT snapped to reference line
+        if (!isSnappedToReferenceLine)
+        {
+            // Snap to horizontal or vertical if within 10 degrees
+            angle = SnapAngle(angle);
+        }
 
         Point2D endPoint = new Point2D(
             lastPoint.X + length * Math.Cos(angle),
@@ -2130,6 +2189,564 @@ public partial class MainWindow : Window
         {
             _currentShapes.Add(line);
         }
+    }
+
+    private void ShowSnapReferenceLine()
+    {
+        // Remove any existing snap reference line
+        HideSnapReferenceLine();
+
+        // Only show if we have at least one saved busbar
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null || activeLayer.Busbars.Count == 0) return;
+
+        // Get the first busbar
+        var firstBusbar = activeLayer.Busbars[0];
+        if (firstBusbar.Segments.Count == 0) return;
+
+        // Get the start point and direction of the first segment
+        var firstSegment = firstBusbar.Segments[0];
+        Point2D startPoint = firstSegment.StartPoint;
+
+        // Calculate direction angle from first segment
+        double dx = firstSegment.EndPoint.X - firstSegment.StartPoint.X;
+        double dy = firstSegment.EndPoint.Y - firstSegment.StartPoint.Y;
+        double directionAngle = Math.Atan2(dy, dx);
+
+        // Perpendicular angle (90 degrees offset)
+        double perpAngle = directionAngle + Math.PI / 2.0;
+
+        // Extension: 50mm on each side
+        const double extension = 50.0;
+
+        // Calculate the two endpoints of the reference line
+        double cos = Math.Cos(perpAngle);
+        double sin = Math.Sin(perpAngle);
+
+        Point2D lineStart = new Point2D(
+            startPoint.X - extension * cos,
+            startPoint.Y - extension * sin
+        );
+
+        Point2D lineEnd = new Point2D(
+            startPoint.X + extension * cos,
+            startPoint.Y + extension * sin
+        );
+
+        // Create the reference line (light beige color)
+        _snapReferenceLine = new Line
+        {
+            X1 = lineStart.X,
+            Y1 = lineStart.Y,
+            X2 = lineEnd.X,
+            Y2 = lineEnd.Y,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(245, 245, 220)), // Light beige
+            StrokeThickness = 1.5,
+            IsHitTestVisible = false
+        };
+        drawingCanvas.Children.Add(_snapReferenceLine);
+
+        // Create snap points every 10mm along the line
+        const double snapInterval = 10.0; // Busbar thickness
+        int numSnapPoints = (int)(extension * 2 / snapInterval) + 1;
+
+        for (int i = 0; i < numSnapPoints; i++)
+        {
+            double t = i * snapInterval - extension;
+            Point2D snapPoint = new Point2D(
+                startPoint.X + t * cos,
+                startPoint.Y + t * sin
+            );
+
+            var snapDot = new Ellipse
+            {
+                Width = 3,
+                Height = 3,
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 180)), // Slightly darker beige
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(snapDot, snapPoint.X - 1.5);
+            Canvas.SetTop(snapDot, snapPoint.Y - 1.5);
+            drawingCanvas.Children.Add(snapDot);
+            _snapReferencePoints.Add(snapDot);
+        }
+
+        // Now create the end reference line
+        var lastSegment = firstBusbar.Segments[firstBusbar.Segments.Count - 1];
+        Point2D endPoint = lastSegment.EndPoint;
+
+        // Calculate direction angle from last segment
+        double dxEnd = lastSegment.EndPoint.X - lastSegment.StartPoint.X;
+        double dyEnd = lastSegment.EndPoint.Y - lastSegment.StartPoint.Y;
+        double directionAngleEnd = Math.Atan2(dyEnd, dxEnd);
+
+        // Perpendicular angle (90 degrees offset)
+        double perpAngleEnd = directionAngleEnd + Math.PI / 2.0;
+
+        // Calculate the two endpoints of the end reference line
+        double cosEnd = Math.Cos(perpAngleEnd);
+        double sinEnd = Math.Sin(perpAngleEnd);
+
+        Point2D lineStartEnd = new Point2D(
+            endPoint.X - extension * cosEnd,
+            endPoint.Y - extension * sinEnd
+        );
+
+        Point2D lineEndEnd = new Point2D(
+            endPoint.X + extension * cosEnd,
+            endPoint.Y + extension * sinEnd
+        );
+
+        // Create the end reference line (light beige color)
+        _snapReferenceLineEnd = new Line
+        {
+            X1 = lineStartEnd.X,
+            Y1 = lineStartEnd.Y,
+            X2 = lineEndEnd.X,
+            Y2 = lineEndEnd.Y,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(245, 245, 220)), // Light beige
+            StrokeThickness = 1.5,
+            IsHitTestVisible = false
+        };
+        drawingCanvas.Children.Add(_snapReferenceLineEnd);
+
+        // Create snap points every 10mm along the end reference line
+        for (int i = 0; i < numSnapPoints; i++)
+        {
+            double t = i * snapInterval - extension;
+            Point2D snapPoint = new Point2D(
+                endPoint.X + t * cosEnd,
+                endPoint.Y + t * sinEnd
+            );
+
+            var snapDot = new Ellipse
+            {
+                Width = 3,
+                Height = 3,
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 180)), // Slightly darker beige
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(snapDot, snapPoint.X - 1.5);
+            Canvas.SetTop(snapDot, snapPoint.Y - 1.5);
+            drawingCanvas.Children.Add(snapDot);
+            _snapReferencePointsEnd.Add(snapDot);
+        }
+
+        // Create corner (bend) reference lines at angle bisectors
+        // Loop through all segments to find corners (where there are at least 3 segments, corners are at indices 1 to n-2)
+        if (firstBusbar.Segments.Count >= 2)
+        {
+            for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+            {
+                var currentSegment = firstBusbar.Segments[i];
+                var nextSegment = firstBusbar.Segments[i + 1];
+
+                // Get the corner point (end of current segment = start of next segment)
+                Point2D cornerPoint = currentSegment.EndPoint;
+
+                // Calculate angles of the two segments
+                double dx1 = currentSegment.EndPoint.X - currentSegment.StartPoint.X;
+                double dy1 = currentSegment.EndPoint.Y - currentSegment.StartPoint.Y;
+                double angle1 = Math.Atan2(dy1, dx1);
+
+                double dx2 = nextSegment.EndPoint.X - nextSegment.StartPoint.X;
+                double dy2 = nextSegment.EndPoint.Y - nextSegment.StartPoint.Y;
+                double angle2 = Math.Atan2(dy2, dx2);
+
+                // Calculate the bisector angle (average of the two angles)
+                // Need to handle angle wrapping properly
+                double angleDiff = angle2 - angle1;
+                // Normalize to -π to π
+                while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+                while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+                double bisectorAngle = angle1 + angleDiff / 2.0;
+
+                // The reference line should be perpendicular to the bisector (add 90 degrees)
+                double perpBisectorAngle = bisectorAngle + Math.PI / 2.0;
+
+                // Calculate the two endpoints of the corner reference line
+                double cosBisector = Math.Cos(perpBisectorAngle);
+                double sinBisector = Math.Sin(perpBisectorAngle);
+
+                Point2D cornerLineStart = new Point2D(
+                    cornerPoint.X - extension * cosBisector,
+                    cornerPoint.Y - extension * sinBisector
+                );
+
+                Point2D cornerLineEnd = new Point2D(
+                    cornerPoint.X + extension * cosBisector,
+                    cornerPoint.Y + extension * sinBisector
+                );
+
+                // Create the corner reference line (light blue color to distinguish from end lines)
+                var cornerLine = new Line
+                {
+                    X1 = cornerLineStart.X,
+                    Y1 = cornerLineStart.Y,
+                    X2 = cornerLineEnd.X,
+                    Y2 = cornerLineEnd.Y,
+                    Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(220, 235, 245)), // Light blue
+                    StrokeThickness = 1.5,
+                    IsHitTestVisible = false
+                };
+                drawingCanvas.Children.Add(cornerLine);
+                _snapReferenceLinesCorners.Add(cornerLine);
+
+                // Create snap points along the diagonal
+                // For a 10mm x 10mm triangle, hypotenuse = sqrt(10^2 + 10^2) = 14.14mm
+                const double diagonalSnapInterval = 14.142135623730951; // sqrt(200)
+
+                // Calculate how many points fit in the extension range on each side
+                int numPointsPerSide = (int)(extension / diagonalSnapInterval);
+
+                // Create points from negative side to positive side, including center point at 0
+                for (int j = -numPointsPerSide; j <= numPointsPerSide; j++)
+                {
+                    double t = j * diagonalSnapInterval;
+                    Point2D snapPoint = new Point2D(
+                        cornerPoint.X + t * cosBisector,
+                        cornerPoint.Y + t * sinBisector
+                    );
+
+                    var snapDot = new Ellipse
+                    {
+                        Width = 3,
+                        Height = 3,
+                        Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(180, 200, 220)), // Slightly darker light blue
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(snapDot, snapPoint.X - 1.5);
+                    Canvas.SetTop(snapDot, snapPoint.Y - 1.5);
+                    drawingCanvas.Children.Add(snapDot);
+                    _snapReferencePointsCorners.Add(snapDot);
+                }
+            }
+        }
+    }
+
+    private void HideSnapReferenceLine()
+    {
+        if (_snapReferenceLine != null)
+        {
+            drawingCanvas.Children.Remove(_snapReferenceLine);
+            _snapReferenceLine = null;
+        }
+
+        foreach (var point in _snapReferencePoints)
+        {
+            drawingCanvas.Children.Remove(point);
+        }
+        _snapReferencePoints.Clear();
+
+        if (_snapReferenceLineEnd != null)
+        {
+            drawingCanvas.Children.Remove(_snapReferenceLineEnd);
+            _snapReferenceLineEnd = null;
+        }
+
+        foreach (var point in _snapReferencePointsEnd)
+        {
+            drawingCanvas.Children.Remove(point);
+        }
+        _snapReferencePointsEnd.Clear();
+
+        foreach (var line in _snapReferenceLinesCorners)
+        {
+            drawingCanvas.Children.Remove(line);
+        }
+        _snapReferenceLinesCorners.Clear();
+
+        foreach (var point in _snapReferencePointsCorners)
+        {
+            drawingCanvas.Children.Remove(point);
+        }
+        _snapReferencePointsCorners.Clear();
+    }
+
+    private void UpdateReferenceLineVisibility(Point2D cursorPos)
+    {
+        // If no reference lines exist, nothing to do
+        if (_snapReferenceLine == null && _snapReferenceLineEnd == null && _snapReferenceLinesCorners.Count == 0)
+            return;
+
+        // Get the first busbar to calculate distances
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null || activeLayer.Busbars.Count == 0) return;
+
+        var firstBusbar = activeLayer.Busbars[0];
+        if (firstBusbar.Segments.Count == 0) return;
+
+        // Find which reference line is closest to the cursor
+        double minDistance = double.MaxValue;
+        int closestType = -1; // 0 = start, 1 = end, 2+ = corner index
+
+        // Check distance to start reference line
+        if (_snapReferenceLine != null)
+        {
+            var firstSegment = firstBusbar.Segments[0];
+            Point2D startPoint = firstSegment.StartPoint;
+            double dist = cursorPos.DistanceTo(startPoint);
+            if (dist < minDistance)
+            {
+                minDistance = dist;
+                closestType = 0;
+            }
+        }
+
+        // Check distance to end reference line
+        if (_snapReferenceLineEnd != null)
+        {
+            var lastSegment = firstBusbar.Segments[firstBusbar.Segments.Count - 1];
+            Point2D endPoint = lastSegment.EndPoint;
+            double dist = cursorPos.DistanceTo(endPoint);
+            if (dist < minDistance)
+            {
+                minDistance = dist;
+                closestType = 1;
+            }
+        }
+
+        // Check distance to corner reference lines
+        for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+        {
+            var currentSegment = firstBusbar.Segments[i];
+            Point2D cornerPoint = currentSegment.EndPoint;
+            double dist = cursorPos.DistanceTo(cornerPoint);
+            if (dist < minDistance)
+            {
+                minDistance = dist;
+                closestType = 2 + i;
+            }
+        }
+
+        // Update visibility based on closest type
+        // Start line
+        if (_snapReferenceLine != null)
+        {
+            _snapReferenceLine.Visibility = (closestType == 0) ? Visibility.Visible : Visibility.Collapsed;
+        }
+        foreach (var point in _snapReferencePoints)
+        {
+            point.Visibility = (closestType == 0) ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // End line
+        if (_snapReferenceLineEnd != null)
+        {
+            _snapReferenceLineEnd.Visibility = (closestType == 1) ? Visibility.Visible : Visibility.Collapsed;
+        }
+        foreach (var point in _snapReferencePointsEnd)
+        {
+            point.Visibility = (closestType == 1) ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // Corner lines
+        for (int i = 0; i < _snapReferenceLinesCorners.Count; i++)
+        {
+            bool isVisible = (closestType == 2 + i);
+            _snapReferenceLinesCorners[i].Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // Corner points - need to figure out which points belong to which corner
+        // Since we add all corner points sequentially, we need to track point counts per corner
+        var activeLayer2 = _currentProject.GetActiveLayer();
+        if (activeLayer2 != null && activeLayer2.Busbars.Count > 0)
+        {
+            var fb = activeLayer2.Busbars[0];
+            int pointIndex = 0;
+            for (int i = 0; i < fb.Segments.Count - 1; i++)
+            {
+                bool isVisible = (closestType == 2 + i);
+                const double extension = 50.0;
+                const double diagonalSnapInterval = 14.142135623730951;
+                int numPointsPerSide = (int)(extension / diagonalSnapInterval);
+                int totalPoints = numPointsPerSide * 2 + 1;
+
+                for (int j = 0; j < totalPoints && pointIndex < _snapReferencePointsCorners.Count; j++)
+                {
+                    _snapReferencePointsCorners[pointIndex].Visibility = isVisible ? Visibility.Visible : Visibility.Collapsed;
+                    pointIndex++;
+                }
+            }
+        }
+    }
+
+    private Point2D SnapToReferenceLine(Point2D clickPoint)
+    {
+        if (_snapReferenceLine == null && _snapReferenceLineEnd == null && _snapReferenceLinesCorners.Count == 0) return clickPoint;
+
+        // Get the first busbar to calculate reference line direction
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null || activeLayer.Busbars.Count == 0) return clickPoint;
+
+        var firstBusbar = activeLayer.Busbars[0];
+        if (firstBusbar.Segments.Count == 0) return clickPoint;
+
+        Point2D? closestSnapPoint = null;
+        double closestDistance = double.MaxValue;
+
+        // Check start reference line
+        if (_snapReferenceLine != null)
+        {
+            var firstSegment = firstBusbar.Segments[0];
+            Point2D startPoint = firstSegment.StartPoint;
+
+            // Calculate direction angle from first segment
+            double dx = firstSegment.EndPoint.X - firstSegment.StartPoint.X;
+            double dy = firstSegment.EndPoint.Y - firstSegment.StartPoint.Y;
+            double directionAngle = Math.Atan2(dy, dx);
+
+            // Perpendicular angle (90 degrees offset)
+            double perpAngle = directionAngle + Math.PI / 2.0;
+
+            // Calculate perpendicular distance from click point to reference line
+            double cos = Math.Cos(perpAngle);
+            double sin = Math.Sin(perpAngle);
+
+            // Vector from startPoint to clickPoint
+            double vx = clickPoint.X - startPoint.X;
+            double vy = clickPoint.Y - startPoint.Y;
+
+            // Project onto perpendicular direction (distance along the reference line)
+            double distanceAlongLine = vx * cos + vy * sin;
+
+            // Snap to nearest 10mm interval
+            const double snapInterval = 10.0;
+            double snappedDistance = Math.Round(distanceAlongLine / snapInterval) * snapInterval;
+
+            // Clamp to ±50mm
+            const double maxDistance = 50.0;
+            if (snappedDistance >= -maxDistance && snappedDistance <= maxDistance)
+            {
+                // Calculate snapped point on the start reference line
+                Point2D snappedPoint = new Point2D(
+                    startPoint.X + snappedDistance * cos,
+                    startPoint.Y + snappedDistance * sin
+                );
+
+                double dist = clickPoint.DistanceTo(snappedPoint);
+                if (dist < closestDistance)
+                {
+                    closestDistance = dist;
+                    closestSnapPoint = snappedPoint;
+                }
+            }
+        }
+
+        // Check end reference line
+        if (_snapReferenceLineEnd != null)
+        {
+            var lastSegment = firstBusbar.Segments[firstBusbar.Segments.Count - 1];
+            Point2D endPoint = lastSegment.EndPoint;
+
+            // Calculate direction angle from last segment
+            double dx = lastSegment.EndPoint.X - lastSegment.StartPoint.X;
+            double dy = lastSegment.EndPoint.Y - lastSegment.StartPoint.Y;
+            double directionAngle = Math.Atan2(dy, dx);
+
+            // Perpendicular angle (90 degrees offset)
+            double perpAngle = directionAngle + Math.PI / 2.0;
+
+            // Calculate perpendicular distance from click point to reference line
+            double cos = Math.Cos(perpAngle);
+            double sin = Math.Sin(perpAngle);
+
+            // Vector from endPoint to clickPoint
+            double vx = clickPoint.X - endPoint.X;
+            double vy = clickPoint.Y - endPoint.Y;
+
+            // Project onto perpendicular direction (distance along the reference line)
+            double distanceAlongLine = vx * cos + vy * sin;
+
+            // Snap to nearest 10mm interval
+            const double snapInterval = 10.0;
+            double snappedDistance = Math.Round(distanceAlongLine / snapInterval) * snapInterval;
+
+            // Clamp to ±50mm
+            const double maxDistance = 50.0;
+            if (snappedDistance >= -maxDistance && snappedDistance <= maxDistance)
+            {
+                // Calculate snapped point on the end reference line
+                Point2D snappedPoint = new Point2D(
+                    endPoint.X + snappedDistance * cos,
+                    endPoint.Y + snappedDistance * sin
+                );
+
+                double dist = clickPoint.DistanceTo(snappedPoint);
+                if (dist < closestDistance)
+                {
+                    closestDistance = dist;
+                    closestSnapPoint = snappedPoint;
+                }
+            }
+        }
+
+        // Check corner reference lines
+        if (_snapReferenceLinesCorners.Count > 0 && firstBusbar.Segments.Count >= 2)
+        {
+            for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+            {
+                var currentSegment = firstBusbar.Segments[i];
+                var nextSegment = firstBusbar.Segments[i + 1];
+
+                // Get the corner point
+                Point2D cornerPoint = currentSegment.EndPoint;
+
+                // Calculate angles of the two segments
+                double dx1 = currentSegment.EndPoint.X - currentSegment.StartPoint.X;
+                double dy1 = currentSegment.EndPoint.Y - currentSegment.StartPoint.Y;
+                double angle1 = Math.Atan2(dy1, dx1);
+
+                double dx2 = nextSegment.EndPoint.X - nextSegment.StartPoint.X;
+                double dy2 = nextSegment.EndPoint.Y - nextSegment.StartPoint.Y;
+                double angle2 = Math.Atan2(dy2, dx2);
+
+                // Calculate the bisector angle
+                double angleDiff = angle2 - angle1;
+                while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+                while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+                double bisectorAngle = angle1 + angleDiff / 2.0;
+
+                // The reference line should be perpendicular to the bisector (add 90 degrees)
+                double perpBisectorAngle = bisectorAngle + Math.PI / 2.0;
+
+                double cosBisector = Math.Cos(perpBisectorAngle);
+                double sinBisector = Math.Sin(perpBisectorAngle);
+
+                // Vector from cornerPoint to clickPoint
+                double vx = clickPoint.X - cornerPoint.X;
+                double vy = clickPoint.Y - cornerPoint.Y;
+
+                // Project onto bisector direction
+                double distanceAlongLine = vx * cosBisector + vy * sinBisector;
+
+                // Snap to nearest diagonal interval (sqrt(200) ≈ 14.142mm)
+                const double diagonalSnapInterval = 14.142135623730951;
+                double snappedDistance = Math.Round(distanceAlongLine / diagonalSnapInterval) * diagonalSnapInterval;
+
+                // Clamp to ±50mm
+                const double maxDistance = 50.0;
+                if (snappedDistance >= -maxDistance && snappedDistance <= maxDistance)
+                {
+                    // Calculate snapped point on the corner reference line
+                    Point2D snappedPoint = new Point2D(
+                        cornerPoint.X + snappedDistance * cosBisector,
+                        cornerPoint.Y + snappedDistance * sinBisector
+                    );
+
+                    double dist = clickPoint.DistanceTo(snappedPoint);
+                    if (dist < closestDistance)
+                    {
+                        closestDistance = dist;
+                        closestSnapPoint = snappedPoint;
+                    }
+                }
+            }
+        }
+
+        return closestSnapPoint ?? clickPoint;
     }
 
     private void DrawPreviewArc(Point2D p1, Point2D p2, Point2D p3, double radius)
