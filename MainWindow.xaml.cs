@@ -67,6 +67,19 @@ public partial class MainWindow : Window
     private List<Line> _snapReferenceLinesCorners = new List<Line>(); // Reference snap lines at corners (bends)
     private List<Ellipse> _snapReferencePointsCorners = new List<Ellipse>(); // Snap points along corner reference lines
 
+    // Dynamic reference line (shown when hovering over corner reference points)
+    private Line? _dynamicSnapLine = null;
+    private List<Ellipse> _dynamicSnapPoints = new List<Ellipse>();
+    private Point2D? _dynamicSnapAnchor = null; // The locked diagonal point where dynamic line is anchored
+    private double _dynamicSnapAngle = 0; // The angle of the dynamic line
+    private double _dynamicSnapInterval = 10.0; // The spacing between snap points on the dynamic line
+    private bool _dynamicSnapDisabled = false; // Prevent re-creating dynamic line after it's been disabled
+    private Point2D? _dynamicSnapDisabledForPoint = null; // Track which snap point disabled the dynamic line
+
+    // Snapping control
+    private bool _isSnappingDisabled = false; // Universal snapping disable flag (for button and auto-disable after click)
+    private int _lastVisibleReferenceLineIndex = -1; // Track which reference line is currently visible (-1=start, -2=end, 0+=corner index)
+
     public MainWindow()
     {
         InitializeComponent();
@@ -431,6 +444,8 @@ public partial class MainWindow : Window
         _currentSegments.Clear();
         _currentShapes.Clear();
         _segmentsForcedToMinimum.Clear();
+        _isSnappingDisabled = false; // Re-enable snapping for new drawing
+        _lastVisibleReferenceLineIndex = -1; // Reset visible reference line tracker
         _currentBusbarIndex = -1;
         _waitingForLengthInput = false;  // Reset input state
         _isEditingLength = false;
@@ -615,6 +630,9 @@ public partial class MainWindow : Window
         // Hide snap reference line
         HideSnapReferenceLine();
 
+        // Hide dynamic snap line
+        HideDynamicSnapLine();
+
         // Select the finished busbar in the ListBox
         if (finishedBusbarIndex >= 0 && finishedBusbarIndex < lstBusbars.Items.Count)
         {
@@ -764,6 +782,9 @@ public partial class MainWindow : Window
         // Hide snap reference line
         HideSnapReferenceLine();
 
+        // Hide dynamic snap line
+        HideDynamicSnapLine();
+
         UpdateStatusBar("Drawing cancelled");
     }
 
@@ -870,9 +891,39 @@ public partial class MainWindow : Window
             _previewLine = null;
         }
 
-        // Check if cursor is near reference line snap point (priority check)
+        // Handle snapping with priority: dynamic line first, then regular reference lines
         bool isSnappedToReferenceLine = false;
-        if (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0)
+        bool usedDynamicSnap = false;
+
+        if (_currentPoints.Count >= 1)
+        {
+            var lastPoint = _currentPoints[_currentPoints.Count - 1];
+
+            // First, try dynamic line snapping if we have an active dynamic line
+            if (_dynamicSnapAnchor != null)
+            {
+                bool shouldBreakSnap;
+                Point2D dynamicSnappedPos = SnapToDynamicLine(pt, lastPoint, out shouldBreakSnap);
+
+                if (shouldBreakSnap)
+                {
+                    // Moving beyond dynamic line, break the snap and hide dynamic line
+                    _dynamicSnapDisabledForPoint = _dynamicSnapAnchor; // Remember which point was disabled
+                    HideDynamicSnapLine();
+                    _dynamicSnapDisabled = true; // Prevent re-creating until snapping to different point
+                }
+                else
+                {
+                    // Successfully snapped to dynamic line
+                    pt = dynamicSnappedPos;
+                    isSnappedToReferenceLine = true;
+                    usedDynamicSnap = true;
+                }
+            }
+        }
+
+        // If not using dynamic snap, check regular reference line snapping
+        if (!usedDynamicSnap && (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0))
         {
             Point2D snappedPos = SnapToReferenceLine(pt);
             // Only snap if cursor is within snapping distance (10mm)
@@ -905,6 +956,13 @@ public partial class MainWindow : Window
 
         // Add the point
         _currentPoints.Add(pt);
+
+        // Disable snapping after placing a point until the visible reference line changes
+        _isSnappingDisabled = true;
+
+        // Hide the dynamic snap line since we've placed a point
+        HideDynamicSnapLine();
+        _dynamicSnapDisabled = false; // Allow new dynamic line for next segment
 
         // Draw the blue point at the clicked location
         DrawPoint(pt, Brushes.Blue);
@@ -1353,23 +1411,24 @@ public partial class MainWindow : Window
         // Update which reference line is visible based on cursor proximity
         UpdateReferenceLineVisibility(currentPt);
 
-        // Snap to reference line if it exists and cursor is close to it
+        // Handle snapping with priority: dynamic line first, then regular reference lines
         Point2D snappedCursor = currentPt;
-        if (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0)
-        {
-            Point2D snappedPos = SnapToReferenceLine(currentPt);
-            // Check if cursor is within snapping distance (10mm)
-            double snapDistance = currentPt.DistanceTo(snappedPos);
-            if (snapDistance <= 10.0)
-            {
-                snappedCursor = snappedPos;
-            }
-        }
 
-        // Need at least one point to calculate preview position
+        // Need at least one point to use dynamic line snapping
         if (_currentPoints.Count == 0)
         {
-            // No points yet, show preview at cursor location (or snapped location)
+            // No points yet, but still check for reference line snapping (if not disabled)
+            if (!_isSnappingDisabled && (_snapReferenceLine != null || _snapReferenceLineEnd != null))
+            {
+                Point2D refSnappedPos = SnapToReferenceLine(currentPt);
+                double refSnapDistance = currentPt.DistanceTo(refSnappedPos);
+                if (refSnapDistance <= 10.0)
+                {
+                    snappedCursor = refSnappedPos;
+                }
+            }
+
+            // Show preview at cursor location (or snapped location)
             _previewPoint = new Ellipse
             {
                 Width = 2,
@@ -1390,15 +1449,155 @@ public partial class MainWindow : Window
         // Calculate preview measurements
         const double minLength = 50.0;  // Minimum segment length
 
-        // Check if cursor is snapped to reference line
+        // First, try dynamic line snapping if we have an active dynamic line
         bool isSnappedToReferenceLine = false;
-        if (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0)
+        bool usedDynamicSnap = false;
+
+        // Only process snapping if not disabled
+        if (!_isSnappingDisabled)
         {
-            Point2D refSnappedPos = SnapToReferenceLine(currentPt);
-            double refSnapDistance = currentPt.DistanceTo(refSnappedPos);
-            if (refSnapDistance <= 10.0)
+            if (_dynamicSnapAnchor != null)
             {
-                isSnappedToReferenceLine = true;
+                // We have an active dynamic line, try to snap to it
+                // The angle stays locked from when it was created
+                bool shouldBreakSnap;
+                Point2D dynamicSnappedPos = SnapToDynamicLine(currentPt, lastPoint, out shouldBreakSnap);
+
+                if (shouldBreakSnap)
+                {
+                    // Moving too far perpendicular or beyond 5 points, break the snap and hide dynamic line
+                    _dynamicSnapDisabledForPoint = _dynamicSnapAnchor; // Remember which point was disabled
+                    HideDynamicSnapLine();
+                    _dynamicSnapDisabled = true; // Prevent re-creating until snapping to different point
+                }
+                else
+                {
+                    // Successfully snapped to dynamic line
+                    snappedCursor = dynamicSnappedPos;
+                    isSnappedToReferenceLine = true; // Treat as reference line snap for angle handling
+                    usedDynamicSnap = true;
+                }
+            }
+
+            // If not using dynamic snap, check regular reference line snapping
+            if (!usedDynamicSnap && (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0))
+            {
+                Point2D refSnappedPos = SnapToReferenceLine(currentPt);
+                double refSnapDistance = currentPt.DistanceTo(refSnappedPos);
+                if (refSnapDistance <= 10.0)
+                {
+                    snappedCursor = refSnappedPos;
+                    isSnappedToReferenceLine = true;
+
+                    // Check if we're snapping to a corner diagonal reference line
+                    // If so, we should create a dynamic line
+                    // Reset disabled flag if we're snapping to a different point than the one that was disabled
+                    if (_dynamicSnapDisabled && _dynamicSnapDisabledForPoint != null)
+                    {
+                        double distToDisabledPoint = refSnappedPos.DistanceTo(_dynamicSnapDisabledForPoint.Value);
+                        // Diagonal snap points are spaced ~14mm apart, so use 5mm threshold to detect different point
+                        if (distToDisabledPoint > 5.0)
+                        {
+                            _dynamicSnapDisabled = false;
+                            _dynamicSnapDisabledForPoint = null;
+                        }
+                    }
+
+                    if (_snapReferenceLinesCorners.Count > 0 && _dynamicSnapAnchor == null && !_dynamicSnapDisabled)
+                    {
+                        // First check if we're actually snapping to a diagonal line (not start/end line)
+                        // by checking if snapped point is close to any diagonal snap point
+                        bool isOnDiagonalLine = false;
+                        foreach (var cornerSnapPoint in _snapReferencePointsCorners)
+                        {
+                            double px = Canvas.GetLeft(cornerSnapPoint) + 1.5;
+                            double py = Canvas.GetTop(cornerSnapPoint) + 1.5;
+                            double dist = Math.Sqrt(Math.Pow(snappedCursor.X - px, 2) + Math.Pow(snappedCursor.Y - py, 2));
+                            if (dist < 2.0)
+                            {
+                                isOnDiagonalLine = true;
+                                break;
+                            }
+                        }
+
+                        if (isOnDiagonalLine)
+                        {
+                        var activeLayer = _currentProject.GetActiveLayer();
+                        if (activeLayer != null && activeLayer.Busbars.Count > 0)
+                        {
+                            var firstBusbar = activeLayer.Busbars[0];
+                            if (firstBusbar.Segments.Count >= 2)
+                            {
+                                // Find which diagonal line we snapped to by finding the closest corner
+                                double closestCornerDist = double.MaxValue;
+                                int closestCornerIndex = -1;
+
+                                for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+                                {
+                                    Point2D cornerPoint = firstBusbar.Segments[i].EndPoint;
+                                    double distToCorner = snappedCursor.DistanceTo(cornerPoint);
+
+                                    if (distToCorner < closestCornerDist)
+                                    {
+                                        closestCornerDist = distToCorner;
+                                        closestCornerIndex = i;
+                                    }
+                                }
+
+                                // Create dynamic line for the closest corner's diagonal
+                                if (closestCornerIndex >= 0)
+                                {
+                                    // Calculate the angle from last clicked point to the snapped cursor position
+                                    // This is the direction of the dynamic line
+                                    double dxDynamic = snappedCursor.X - lastPoint.X;
+                                    double dyDynamic = snappedCursor.Y - lastPoint.Y;
+                                    double dynamicAngle = Math.Atan2(dyDynamic, dxDynamic);
+
+                                    // Get the corner angle difference for spacing calculation
+                                    int i = closestCornerIndex;
+                                    var currentSegment = firstBusbar.Segments[i];
+                                    var nextSegment = firstBusbar.Segments[i + 1];
+
+                                    // Use stored angles from segments (convert from degrees to radians)
+                                    double angle1 = currentSegment.Angle * Math.PI / 180.0;
+                                    double angle2 = nextSegment.Angle * Math.PI / 180.0;
+
+                                    double angleDiff = angle2 - angle1;
+                                    while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+                                    while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+                                    // Calculate angle between dynamic line and both segments
+                                    // Use the one that gives the angle closest to 90° (most perpendicular)
+                                    double angleBetween1 = dynamicAngle - angle1;
+                                    while (angleBetween1 > Math.PI) angleBetween1 -= 2 * Math.PI;
+                                    while (angleBetween1 < -Math.PI) angleBetween1 += 2 * Math.PI;
+
+                                    double angleBetween2 = dynamicAngle - angle2;
+                                    while (angleBetween2 > Math.PI) angleBetween2 -= 2 * Math.PI;
+                                    while (angleBetween2 < -Math.PI) angleBetween2 += 2 * Math.PI;
+
+                                    // Normalize both to acute angles (0 to 90 degrees)
+                                    angleBetween1 = Math.Abs(angleBetween1);
+                                    if (angleBetween1 > Math.PI / 2) angleBetween1 = Math.PI - angleBetween1;
+
+                                    angleBetween2 = Math.Abs(angleBetween2);
+                                    if (angleBetween2 > Math.PI / 2) angleBetween2 = Math.PI - angleBetween2;
+
+                                    // Use the angle that is closer to 90° (perpendicular)
+                                    // This is the angle with value closer to π/2
+                                    double diff1From90 = Math.Abs(angleBetween1 - Math.PI / 2);
+                                    double diff2From90 = Math.Abs(angleBetween2 - Math.PI / 2);
+
+                                    double angleBetween = (diff1From90 < diff2From90) ? angleBetween1 : angleBetween2;
+
+                                    // Create dynamic line at the snapped position
+                                    ShowDynamicSnapLine(snappedCursor, dynamicAngle, angleBetween);
+                                }
+                            }
+                        }
+                        }
+                    }
+                }
             }
         }
 
@@ -2365,18 +2564,38 @@ public partial class MainWindow : Window
                 // The reference line should be perpendicular to the bisector (add 90 degrees)
                 double perpBisectorAngle = bisectorAngle + Math.PI / 2.0;
 
+                // Calculate the correct diagonal snap interval based on the corner angle
+                // For a perpendicular offset of busbarThickness, the spacing along the bisector is:
+                // spacing = busbarThickness / cos(angleDiff/2)
+                // As angle gets smaller (nearly straight), spacing approaches busbar thickness
+                // As angle gets larger (sharp turn), spacing increases
+                const double busbarThickness = 10.0;
+                double halfAngleDiff = Math.Abs(angleDiff) / 2.0;
+
+                // Avoid division by zero for angles close to 180 degrees
+                double cosHalfAngle = Math.Cos(halfAngleDiff);
+                if (Math.Abs(cosHalfAngle) < 0.01) cosHalfAngle = 0.01;
+
+                double diagonalSnapInterval = busbarThickness / cosHalfAngle;
+
+                // Fixed number of snap points: ±5 points (11 total including center)
+                const int numPointsPerSide = 5;
+
+                // Calculate line extension based on snap points (5 points on each side)
+                double cornerExtension = numPointsPerSide * diagonalSnapInterval;
+
                 // Calculate the two endpoints of the corner reference line
                 double cosBisector = Math.Cos(perpBisectorAngle);
                 double sinBisector = Math.Sin(perpBisectorAngle);
 
                 Point2D cornerLineStart = new Point2D(
-                    cornerPoint.X - extension * cosBisector,
-                    cornerPoint.Y - extension * sinBisector
+                    cornerPoint.X - cornerExtension * cosBisector,
+                    cornerPoint.Y - cornerExtension * sinBisector
                 );
 
                 Point2D cornerLineEnd = new Point2D(
-                    cornerPoint.X + extension * cosBisector,
-                    cornerPoint.Y + extension * sinBisector
+                    cornerPoint.X + cornerExtension * cosBisector,
+                    cornerPoint.Y + cornerExtension * sinBisector
                 );
 
                 // Create the corner reference line (light blue color to distinguish from end lines)
@@ -2393,13 +2612,6 @@ public partial class MainWindow : Window
                 drawingCanvas.Children.Add(cornerLine);
                 _snapReferenceLinesCorners.Add(cornerLine);
 
-                // Create snap points along the diagonal
-                // For a 10mm x 10mm triangle, hypotenuse = sqrt(10^2 + 10^2) = 14.14mm
-                const double diagonalSnapInterval = 14.142135623730951; // sqrt(200)
-
-                // Calculate how many points fit in the extension range on each side
-                int numPointsPerSide = (int)(extension / diagonalSnapInterval);
-
                 // Create points from negative side to positive side, including center point at 0
                 for (int j = -numPointsPerSide; j <= numPointsPerSide; j++)
                 {
@@ -2413,7 +2625,7 @@ public partial class MainWindow : Window
                     {
                         Width = 3,
                         Height = 3,
-                        Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(180, 200, 220)), // Slightly darker light blue
+                        Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(180, 200, 220)),
                         IsHitTestVisible = false
                     };
                     Canvas.SetLeft(snapDot, snapPoint.X - 1.5);
@@ -2462,6 +2674,104 @@ public partial class MainWindow : Window
             drawingCanvas.Children.Remove(point);
         }
         _snapReferencePointsCorners.Clear();
+    }
+
+    private void ShowDynamicSnapLine(Point2D anchorPoint, double angleRadians, double angleBetweenDynamicAndSegment)
+    {
+        // Remove existing line if any
+        HideDynamicSnapLine();
+
+        // Store the anchor point and angle for locked snapping
+        _dynamicSnapAnchor = anchorPoint;
+        _dynamicSnapAngle = angleRadians;
+
+        // Calculate direction vector
+        double cos = Math.Cos(angleRadians);
+        double sin = Math.Sin(angleRadians);
+
+        // Calculate dynamic snap interval based on angle between dynamic line and target segment
+        // Each step along the dynamic line should create exactly one busbar thickness perpendicular offset
+        // spacing = busbarThickness / sin(angle_between)
+        const double busbarThickness = 10.0;
+
+        // Avoid division by zero for very small or very large angles
+        double sinAngleBetween = Math.Sin(Math.Abs(angleBetweenDynamicAndSegment));
+        if (Math.Abs(sinAngleBetween) < 0.01) sinAngleBetween = 0.01;
+
+        double dynamicSnapInterval = busbarThickness / sinAngleBetween;
+
+        // Store the interval for use in SnapToDynamicLine
+        _dynamicSnapInterval = dynamicSnapInterval;
+
+        // Fixed number of snap points: ±5 points (11 total including center)
+        const int numPointsPerSide = 5;
+
+        // Calculate line extension based on snap points
+        double extension = numPointsPerSide * dynamicSnapInterval;
+
+        Point2D lineStart = new Point2D(
+            anchorPoint.X - extension * cos,
+            anchorPoint.Y - extension * sin
+        );
+        Point2D lineEnd = new Point2D(
+            anchorPoint.X + extension * cos,
+            anchorPoint.Y + extension * sin
+        );
+
+        // Create the yellow dynamic reference line
+        _dynamicSnapLine = new Line
+        {
+            X1 = lineStart.X,
+            Y1 = lineStart.Y,
+            X2 = lineEnd.X,
+            Y2 = lineEnd.Y,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 255, 150)),
+            StrokeThickness = 1.5,
+            IsHitTestVisible = false
+        };
+        drawingCanvas.Children.Add(_dynamicSnapLine);
+
+        // Create snap points at calculated intervals (±5 points = 11 total)
+        for (int i = -numPointsPerSide; i <= numPointsPerSide; i++)
+        {
+            double distance = i * dynamicSnapInterval;
+            Point2D snapDot = new Point2D(
+                anchorPoint.X + distance * cos,
+                anchorPoint.Y + distance * sin
+            );
+
+            var dot = new Ellipse
+            {
+                Width = 3,
+                Height = 3,
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 100)),
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(dot, snapDot.X - 1.5);
+            Canvas.SetTop(dot, snapDot.Y - 1.5);
+            drawingCanvas.Children.Add(dot);
+            _dynamicSnapPoints.Add(dot);
+        }
+    }
+
+    private void HideDynamicSnapLine()
+    {
+        if (_dynamicSnapLine != null)
+        {
+            drawingCanvas.Children.Remove(_dynamicSnapLine);
+            _dynamicSnapLine = null;
+        }
+
+        foreach (var point in _dynamicSnapPoints)
+        {
+            drawingCanvas.Children.Remove(point);
+        }
+        _dynamicSnapPoints.Clear();
+
+        // Clear the locked anchor point, angle, and interval
+        _dynamicSnapAnchor = null;
+        _dynamicSnapAngle = 0;
+        _dynamicSnapInterval = 10.0;
     }
 
     private void UpdateReferenceLineVisibility(Point2D cursorPos)
@@ -2520,6 +2830,14 @@ public partial class MainWindow : Window
             }
         }
 
+        // Check if the visible reference line has changed
+        // If it has, re-enable snapping
+        if (_lastVisibleReferenceLineIndex != closestType)
+        {
+            _isSnappingDisabled = false;
+            _lastVisibleReferenceLineIndex = closestType;
+        }
+
         // Update visibility based on closest type
         // Start line
         if (_snapReferenceLine != null)
@@ -2558,9 +2876,8 @@ public partial class MainWindow : Window
             for (int i = 0; i < fb.Segments.Count - 1; i++)
             {
                 bool isVisible = (closestType == 2 + i);
-                const double extension = 50.0;
-                const double diagonalSnapInterval = 14.142135623730951;
-                int numPointsPerSide = (int)(extension / diagonalSnapInterval);
+                // Fixed number of points: ±5 (11 total including center)
+                const int numPointsPerSide = 5;
                 int totalPoints = numPointsPerSide * 2 + 1;
 
                 for (int j = 0; j < totalPoints && pointIndex < _snapReferencePointsCorners.Count; j++)
@@ -2722,12 +3039,18 @@ public partial class MainWindow : Window
                 // Project onto bisector direction
                 double distanceAlongLine = vx * cosBisector + vy * sinBisector;
 
-                // Snap to nearest diagonal interval (sqrt(200) ≈ 14.142mm)
-                const double diagonalSnapInterval = 14.142135623730951;
+                // Calculate the correct diagonal snap interval based on the corner angle
+                const double busbarThickness = 10.0;
+                double halfAngleDiff = Math.Abs(angleDiff) / 2.0;
+                double cosHalfAngle = Math.Cos(halfAngleDiff);
+                if (Math.Abs(cosHalfAngle) < 0.01) cosHalfAngle = 0.01;
+                double diagonalSnapInterval = busbarThickness / cosHalfAngle;
+
                 double snappedDistance = Math.Round(distanceAlongLine / diagonalSnapInterval) * diagonalSnapInterval;
 
-                // Clamp to ±50mm
-                const double maxDistance = 50.0;
+                // Clamp to ±5 points
+                const int maxPoints = 5;
+                double maxDistance = maxPoints * diagonalSnapInterval;
                 if (snappedDistance >= -maxDistance && snappedDistance <= maxDistance)
                 {
                     // Calculate snapped point on the corner reference line
@@ -2747,6 +3070,66 @@ public partial class MainWindow : Window
         }
 
         return closestSnapPoint ?? clickPoint;
+    }
+
+    private Point2D SnapToDynamicLine(Point2D clickPoint, Point2D lastPoint, out bool shouldBreakSnap)
+    {
+        shouldBreakSnap = false;
+
+        // If no dynamic line is active, return original point
+        if (_dynamicSnapAnchor == null)
+            return clickPoint;
+
+        Point2D anchorPoint = _dynamicSnapAnchor.Value;
+        double lineAngle = _dynamicSnapAngle;
+
+        // Calculate perpendicular distance from cursor to the dynamic line
+        double cos = Math.Cos(lineAngle);
+        double sin = Math.Sin(lineAngle);
+
+        // Vector from anchor to cursor
+        double vx = clickPoint.X - anchorPoint.X;
+        double vy = clickPoint.Y - anchorPoint.Y;
+
+        // Distance along the line (parallel to line)
+        double distanceAlongLine = vx * cos + vy * sin;
+
+        // Distance perpendicular to the line
+        double perpDistance = Math.Abs(vx * (-sin) + vy * cos);
+
+        // Calculate snap tolerance based on the diagonal line angle
+        // For diagonal lines (45 degrees), we need a larger perpendicular tolerance
+        // because the diagonal snap interval is ~14.142mm (sqrt(200))
+        const double baseSnapTolerance = 10.0; // Base tolerance for perpendicular distance
+        double snapTolerance = baseSnapTolerance;
+
+        // Check if we're moving too far perpendicular from the line
+        if (perpDistance > snapTolerance)
+        {
+            shouldBreakSnap = true;
+            return clickPoint;
+        }
+
+        // Snap the distance along the line using the stored dynamic snap interval
+        double snappedDistance = Math.Round(distanceAlongLine / _dynamicSnapInterval) * _dynamicSnapInterval;
+
+        // Count how many snap points away from anchor we are
+        int snapCount = (int)Math.Abs(Math.Round(snappedDistance / _dynamicSnapInterval));
+
+        // If we're more than 5 snaps away, signal to break the snap
+        if (snapCount > 5)
+        {
+            shouldBreakSnap = true;
+            return clickPoint;
+        }
+
+        // Calculate the snapped point on the dynamic line
+        Point2D snappedPoint = new Point2D(
+            anchorPoint.X + snappedDistance * cos,
+            anchorPoint.Y + snappedDistance * sin
+        );
+
+        return snappedPoint;
     }
 
     private void DrawPreviewArc(Point2D p1, Point2D p2, Point2D p3, double radius)
