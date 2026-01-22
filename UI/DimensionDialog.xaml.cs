@@ -61,9 +61,14 @@ namespace BusbarCAD.UI
             for (int i = 0; i < _busbar.Segments.Count; i++)
             {
                 var seg = _busbar.Segments[i];
-                double length = (i == _segmentIndex) ? newDimension : seg.InsideLength;
+                var newSegment = new Segment(seg.StartPoint, seg.EndPoint);
 
-                var newSegment = new Segment(seg.StartPoint, seg.EndPoint, length);
+                // Update length if this is the segment being edited
+                if (i == _segmentIndex)
+                {
+                    newSegment.Length = newDimension;
+                }
+
                 clone.AddSegment(newSegment);
             }
 

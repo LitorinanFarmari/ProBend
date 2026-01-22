@@ -6,17 +6,19 @@ using System.Windows.Shapes;
 using BusbarCAD.Models;
 using BusbarCAD.Calculations;
 using BusbarCAD.Export;
+using BusbarCAD.Rendering;
 using Microsoft.Win32;
 
 namespace BusbarCAD;
 
 /// <summary>
-/// Segment information for display in the DataGrid
+/// Segment information for display in the DataGrid during drawing
+/// Properties match Segment model for consistent DataGrid binding
 /// </summary>
 public class SegmentInfo
 {
-    public string Angle { get; set; } = "";
-    public string Length { get; set; } = "";
+    public double Angle { get; set; } = 0;
+    public double Length { get; set; } = 0;
 }
 
 /// <summary>
@@ -28,10 +30,12 @@ public class SavedBusbar
     public List<Point2D> Points { get; set; } = new List<Point2D>();
     public List<SegmentInfo> Segments { get; set; } = new List<SegmentInfo>();
     public List<Shape> Shapes { get; set; } = new List<Shape>(); // Visual shapes on canvas
+    public Line? StartMarker { get; set; } = null; // Blue perpendicular line at start
+    public Line? EndMarker { get; set; } = null; // Blue perpendicular line at end
 }
 
 /// <summary>
-/// Interaction logic for MainWindow.xaml
+/// Interaction logic for MainWindow.x
 /// </summary>
 public partial class MainWindow : Window
 {
@@ -60,6 +64,8 @@ public partial class MainWindow : Window
     private System.Windows.Shapes.Path? _previewArc = null; // Preview arc at the previous bend
     private List<Shape> _previewMarkers = new List<Shape>(); // Preview perpendicular markers and edge arcs
     private List<bool> _segmentsForcedToMinimum = new List<bool>(); // Track which segments were forced to minimum length
+    private Line? _currentStartMarker = null; // Current busbar's start marker (blue perpendicular line)
+    private Line? _currentEndMarker = null; // Current busbar's end marker (blue perpendicular line)
     private Line? _snapReferenceLine = null; // Reference snap line at the start of first busbar
     private List<Ellipse> _snapReferencePoints = new List<Ellipse>(); // Snap points along the reference line
     private Line? _snapReferenceLineEnd = null; // Reference snap line at the end of first busbar
@@ -79,6 +85,11 @@ public partial class MainWindow : Window
     // Snapping control
     private bool _isSnappingDisabled = false; // Universal snapping disable flag (for button and auto-disable after click)
     private int _lastVisibleReferenceLineIndex = -1; // Track which reference line is currently visible (-1=start, -2=end, 0+=corner index)
+    private Busbar? _lastActiveBusbar = null; // Track the last active busbar for snap line reference
+    private Busbar? _highlightedBusbar = null; // Track which busbar is currently highlighted
+
+    // Rendering
+    private BusbarRenderer? _busbarRenderer = null;
 
     public MainWindow()
     {
@@ -86,6 +97,13 @@ public partial class MainWindow : Window
         InitializeCanvasTransform();
         InitializeProject();
         this.PreviewKeyDown += Window_KeyDown;
+        this.Loaded += MainWindow_Loaded;
+    }
+
+    private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        // Initialize renderer after controls are loaded
+        _busbarRenderer = new BusbarRenderer(drawingCanvas, _currentProject.MaterialSettings);
     }
 
     private void InitializeCanvasTransform()
@@ -481,8 +499,8 @@ public partial class MainWindow : Window
     {
         var segment = new SegmentInfo
         {
-            Angle = angle.ToString("F1"),
-            Length = length.ToString("F1")
+            Angle = angle,
+            Length = length
         };
         _currentSegments.Add(segment);
         UpdateSegmentList();
@@ -503,7 +521,9 @@ public partial class MainWindow : Window
                 Name = busbarName,
                 Points = new List<Point2D>(_currentPoints),
                 Segments = new List<SegmentInfo>(_currentSegments),
-                Shapes = new List<Shape>(_currentShapes)
+                Shapes = new List<Shape>(_currentShapes),
+                StartMarker = _currentStartMarker,
+                EndMarker = _currentEndMarker
             };
 
             _savedBusbars.Add(savedBusbar);
@@ -520,10 +540,26 @@ public partial class MainWindow : Window
             savedBusbar.Points = new List<Point2D>(_currentPoints);
             savedBusbar.Segments = new List<SegmentInfo>(_currentSegments);
             savedBusbar.Shapes = new List<Shape>(_currentShapes);
+            savedBusbar.StartMarker = _currentStartMarker;
+            savedBusbar.EndMarker = _currentEndMarker;
 
             // Update the ListBox item
             lstBusbars.Items[_currentBusbarIndex] = busbarName;
         }
+
+        // Clear current markers
+        _currentStartMarker = null;
+        _currentEndMarker = null;
+    }
+
+    private void HighlightBusbar(Busbar? busbar)
+    {
+        // Use the renderer's highlight method if available
+        if (_busbarRenderer != null)
+        {
+            _busbarRenderer.HighlightBusbar(_highlightedBusbar, busbar);
+        }
+        _highlightedBusbar = busbar;
     }
 
     private void FinishDrawing()
@@ -541,6 +577,8 @@ public partial class MainWindow : Window
         // Get the busbar name from the textbox
         string busbarName = string.IsNullOrWhiteSpace(txtBusbarName.Text) ? "a" : txtBusbarName.Text;
 
+        int finishedBusbarIndex = -1;
+
         // Make sure the busbar is saved (it should already be from SaveOrUpdateCurrentBusbar)
         // But we need to create the project model busbar
         var activeLayer = _currentProject.GetActiveLayer();
@@ -554,9 +592,8 @@ public partial class MainWindow : Window
             {
                 var start = _currentPoints[i];
                 var end = _currentPoints[i + 1];
-                double length = start.DistanceTo(end);
 
-                var segment = new Segment(start, end, length);
+                var segment = new Segment(start, end);
 
                 // Set the WasForcedToMinimum flag if we have tracking data for this segment
                 if (i < _segmentsForcedToMinimum.Count)
@@ -583,6 +620,24 @@ public partial class MainWindow : Window
             ValidationEngine.ValidateBusbar(busbar);
 
             activeLayer.AddBusbar(busbar);
+
+            // Store the index of the newly added busbar
+            finishedBusbarIndex = activeLayer.Busbars.Count - 1;
+
+            // Set as last active busbar for snap line reference
+            _lastActiveBusbar = busbar;
+
+            // Clear temporary drawing shapes from canvas
+            foreach (var shape in _currentShapes)
+            {
+                drawingCanvas.Children.Remove(shape);
+            }
+
+            // Draw the busbar using the renderer (stores visuals in busbar.VisualShapes)
+            if (_busbarRenderer != null)
+            {
+                _busbarRenderer.DrawBusbar(busbar, true); // highlighted since it's the active one
+            }
         }
 
         // Clean up drawing state
@@ -596,8 +651,6 @@ public partial class MainWindow : Window
         KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.Continue);
         KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.Continue);
 
-        // Keep the busbar selected in the list
-        int finishedBusbarIndex = _currentBusbarIndex;
         _currentBusbarIndex = -1;
 
         // Remove preview shapes if they exist
@@ -633,11 +686,8 @@ public partial class MainWindow : Window
         // Hide dynamic snap line
         HideDynamicSnapLine();
 
-        // Select the finished busbar in the ListBox
-        if (finishedBusbarIndex >= 0 && finishedBusbarIndex < lstBusbars.Items.Count)
-        {
-            lstBusbars.SelectedIndex = finishedBusbarIndex;
-        }
+        // Update UI to refresh the busbar list
+        UpdateUI();
 
         // Increment to next letter for next busbar (a -> b -> c ... z -> aa -> ab ...)
         if (_nextBusbarLetter == 'z')
@@ -649,8 +699,20 @@ public partial class MainWindow : Window
             _nextBusbarLetter++;
         }
 
-        UpdateUI();
         UpdateStatusBar($"Busbar '{busbarName}' finished");
+
+        // Select the finished busbar in the ListBox after UI update completes
+        // Use Dispatcher to ensure the list is fully updated before selection
+        if (finishedBusbarIndex >= 0)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (finishedBusbarIndex < lstBusbars.Items.Count)
+                {
+                    lstBusbars.SelectedIndex = finishedBusbarIndex;
+                }
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
+        }
     }
 
     private double CalculateBendAngle(int segmentIndex)
@@ -865,6 +927,15 @@ public partial class MainWindow : Window
 
         // Don't interfere with panning
         if (_isPanning) return;
+
+        // Commit any active DataGrid edits and clear focus to ensure single-click works
+        // This prevents the first click from being consumed by DataGrid losing focus
+        if (dgSegments.IsKeyboardFocusWithin)
+        {
+            dgSegments.CommitEdit();
+            dgSegments.CommitEdit(); // Need to call twice: once for cell, once for row
+            Keyboard.ClearFocus();
+        }
 
         // If we're waiting for length input AND we have at least 2 points already, commit the edit
         // For the first segment (0 or 1 points), allow clicking to place points
@@ -1238,6 +1309,13 @@ public partial class MainWindow : Window
 
     private void DataGrid_CellEditEnding(object sender, DataGridCellEditEndingEventArgs e)
     {
+        // Handle editing a selected busbar's segment length (not during drawing)
+        if (!_isDrawing && !_waitingForLengthInput && e.EditAction == DataGridEditAction.Commit)
+        {
+            HandleBusbarSegmentEdit(e);
+            return;
+        }
+
         if (!_waitingForLengthInput) return;
 
         // If user cancels (moves mouse away), reset the editing flag so timer can work again
@@ -1525,16 +1603,16 @@ public partial class MainWindow : Window
                         var activeLayer = _currentProject.GetActiveLayer();
                         if (activeLayer != null && activeLayer.Busbars.Count > 0)
                         {
-                            var firstBusbar = activeLayer.Busbars[0];
-                            if (firstBusbar.Segments.Count >= 2)
+                            var targetBusbar = _lastActiveBusbar ?? activeLayer.Busbars[0];
+                            if (targetBusbar.Segments.Count >= 2)
                             {
                                 // Find which diagonal line we snapped to by finding the closest corner
                                 double closestCornerDist = double.MaxValue;
                                 int closestCornerIndex = -1;
 
-                                for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+                                for (int i = 0; i < targetBusbar.Segments.Count - 1; i++)
                                 {
-                                    Point2D cornerPoint = firstBusbar.Segments[i].EndPoint;
+                                    Point2D cornerPoint = targetBusbar.Segments[i].EndPoint;
                                     double distToCorner = snappedCursor.DistanceTo(cornerPoint);
 
                                     if (distToCorner < closestCornerDist)
@@ -1555,8 +1633,8 @@ public partial class MainWindow : Window
 
                                     // Get the corner angle difference for spacing calculation
                                     int i = closestCornerIndex;
-                                    var currentSegment = firstBusbar.Segments[i];
-                                    var nextSegment = firstBusbar.Segments[i + 1];
+                                    var currentSegment = targetBusbar.Segments[i];
+                                    var nextSegment = targetBusbar.Segments[i + 1];
 
                                     // Use stored angles from segments (convert from degrees to radians)
                                     double angle1 = currentSegment.Angle * Math.PI / 180.0;
@@ -1795,7 +1873,7 @@ public partial class MainWindow : Window
         UpdateStatusBar("Type length and press Enter to confirm segment");
     }
 
-    private void UpdateLivePreviewMeasurements(Point2D start, Point2D end, string? lengthOverride = null)
+    private void UpdateLivePreviewMeasurements(Point2D start, Point2D end, double? lengthOverride = null)
     {
         if (_currentPoints.Count == 0) return;
 
@@ -1833,8 +1911,8 @@ public partial class MainWindow : Window
         var tempSegments = new List<SegmentInfo>(_currentSegments);
         tempSegments.Add(new SegmentInfo
         {
-            Angle = previewAngle.ToString("F1"),
-            Length = lengthOverride ?? previewLength.ToString("F1")
+            Angle = previewAngle,
+            Length = lengthOverride ?? previewLength
         });
 
         // Update the DataGrid with the preview
@@ -1999,7 +2077,7 @@ public partial class MainWindow : Window
             var firstPoint = _currentPoints[0];
             var secondPoint = _currentPoints[1];
             double startAngle = Math.Atan2(secondPoint.Y - firstPoint.Y, secondPoint.X - firstPoint.X);
-            DrawPerpendicularMarker(firstPoint, startAngle, false, true);
+            _currentStartMarker = DrawPerpendicularMarker(firstPoint, startAngle, false, true);
         }
 
         // Draw centerlines with rounded corners
@@ -2055,7 +2133,7 @@ public partial class MainWindow : Window
             var lastPoint = _currentPoints[_currentPoints.Count - 1];
             var secondLastPoint = _currentPoints[_currentPoints.Count - 2];
             double endAngle = Math.Atan2(lastPoint.Y - secondLastPoint.Y, lastPoint.X - secondLastPoint.X);
-            DrawPerpendicularMarker(lastPoint, endAngle, false, true);
+            _currentEndMarker = DrawPerpendicularMarker(lastPoint, endAngle, false, true);
         }
     }
 
@@ -2339,7 +2417,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void DrawPerpendicularMarker(Point2D position, double directionAngle, bool isPreview, bool isEndPoint = false)
+    private Line DrawPerpendicularMarker(Point2D position, double directionAngle, bool isPreview, bool isEndPoint = false)
     {
         // Draw a perpendicular line at the given position
         // directionAngle is the angle of the centerline at this point (in radians)
@@ -2388,6 +2466,8 @@ public partial class MainWindow : Window
         {
             _currentShapes.Add(line);
         }
+
+        return line;
     }
 
     private void ShowSnapReferenceLine()
@@ -2395,16 +2475,16 @@ public partial class MainWindow : Window
         // Remove any existing snap reference line
         HideSnapReferenceLine();
 
-        // Only show if we have at least one saved busbar
+        // Only show if we have a last active busbar
         var activeLayer = _currentProject.GetActiveLayer();
         if (activeLayer == null || activeLayer.Busbars.Count == 0) return;
 
-        // Get the first busbar
-        var firstBusbar = activeLayer.Busbars[0];
-        if (firstBusbar.Segments.Count == 0) return;
+        // Get the last active busbar (or fall back to first busbar)
+        var targetBusbar = _lastActiveBusbar ?? activeLayer.Busbars[0];
+        if (targetBusbar.Segments.Count == 0) return;
 
         // Get the start point and direction of the first segment
-        var firstSegment = firstBusbar.Segments[0];
+        var firstSegment = targetBusbar.Segments[0];
         Point2D startPoint = firstSegment.StartPoint;
 
         // Calculate direction angle from first segment
@@ -2471,7 +2551,7 @@ public partial class MainWindow : Window
         }
 
         // Now create the end reference line
-        var lastSegment = firstBusbar.Segments[firstBusbar.Segments.Count - 1];
+        var lastSegment = targetBusbar.Segments[targetBusbar.Segments.Count - 1];
         Point2D endPoint = lastSegment.EndPoint;
 
         // Calculate direction angle from last segment
@@ -2533,12 +2613,12 @@ public partial class MainWindow : Window
 
         // Create corner (bend) reference lines at angle bisectors
         // Loop through all segments to find corners (where there are at least 3 segments, corners are at indices 1 to n-2)
-        if (firstBusbar.Segments.Count >= 2)
+        if (targetBusbar.Segments.Count >= 2)
         {
-            for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+            for (int i = 0; i < targetBusbar.Segments.Count - 1; i++)
             {
-                var currentSegment = firstBusbar.Segments[i];
-                var nextSegment = firstBusbar.Segments[i + 1];
+                var currentSegment = targetBusbar.Segments[i];
+                var nextSegment = targetBusbar.Segments[i + 1];
 
                 // Get the corner point (end of current segment = start of next segment)
                 Point2D cornerPoint = currentSegment.EndPoint;
@@ -2784,8 +2864,8 @@ public partial class MainWindow : Window
         var activeLayer = _currentProject.GetActiveLayer();
         if (activeLayer == null || activeLayer.Busbars.Count == 0) return;
 
-        var firstBusbar = activeLayer.Busbars[0];
-        if (firstBusbar.Segments.Count == 0) return;
+        var targetBusbar = _lastActiveBusbar ?? activeLayer.Busbars[0];
+        if (targetBusbar.Segments.Count == 0) return;
 
         // Find which reference line is closest to the cursor
         double minDistance = double.MaxValue;
@@ -2794,7 +2874,7 @@ public partial class MainWindow : Window
         // Check distance to start reference line
         if (_snapReferenceLine != null)
         {
-            var firstSegment = firstBusbar.Segments[0];
+            var firstSegment = targetBusbar.Segments[0];
             Point2D startPoint = firstSegment.StartPoint;
             double dist = cursorPos.DistanceTo(startPoint);
             if (dist < minDistance)
@@ -2807,7 +2887,7 @@ public partial class MainWindow : Window
         // Check distance to end reference line
         if (_snapReferenceLineEnd != null)
         {
-            var lastSegment = firstBusbar.Segments[firstBusbar.Segments.Count - 1];
+            var lastSegment = targetBusbar.Segments[targetBusbar.Segments.Count - 1];
             Point2D endPoint = lastSegment.EndPoint;
             double dist = cursorPos.DistanceTo(endPoint);
             if (dist < minDistance)
@@ -2818,9 +2898,9 @@ public partial class MainWindow : Window
         }
 
         // Check distance to corner reference lines
-        for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+        for (int i = 0; i < targetBusbar.Segments.Count - 1; i++)
         {
-            var currentSegment = firstBusbar.Segments[i];
+            var currentSegment = targetBusbar.Segments[i];
             Point2D cornerPoint = currentSegment.EndPoint;
             double dist = cursorPos.DistanceTo(cornerPoint);
             if (dist < minDistance)
@@ -2871,7 +2951,7 @@ public partial class MainWindow : Window
         var activeLayer2 = _currentProject.GetActiveLayer();
         if (activeLayer2 != null && activeLayer2.Busbars.Count > 0)
         {
-            var fb = activeLayer2.Busbars[0];
+            var fb = _lastActiveBusbar ?? activeLayer2.Busbars[0];
             int pointIndex = 0;
             for (int i = 0; i < fb.Segments.Count - 1; i++)
             {
@@ -2897,8 +2977,8 @@ public partial class MainWindow : Window
         var activeLayer = _currentProject.GetActiveLayer();
         if (activeLayer == null || activeLayer.Busbars.Count == 0) return clickPoint;
 
-        var firstBusbar = activeLayer.Busbars[0];
-        if (firstBusbar.Segments.Count == 0) return clickPoint;
+        var targetBusbar = _lastActiveBusbar ?? activeLayer.Busbars[0];
+        if (targetBusbar.Segments.Count == 0) return clickPoint;
 
         Point2D? closestSnapPoint = null;
         double closestDistance = double.MaxValue;
@@ -2906,7 +2986,7 @@ public partial class MainWindow : Window
         // Check start reference line
         if (_snapReferenceLine != null)
         {
-            var firstSegment = firstBusbar.Segments[0];
+            var firstSegment = targetBusbar.Segments[0];
             Point2D startPoint = firstSegment.StartPoint;
 
             // Calculate direction angle from first segment
@@ -2954,7 +3034,7 @@ public partial class MainWindow : Window
         // Check end reference line
         if (_snapReferenceLineEnd != null)
         {
-            var lastSegment = firstBusbar.Segments[firstBusbar.Segments.Count - 1];
+            var lastSegment = targetBusbar.Segments[targetBusbar.Segments.Count - 1];
             Point2D endPoint = lastSegment.EndPoint;
 
             // Calculate direction angle from last segment
@@ -3000,12 +3080,12 @@ public partial class MainWindow : Window
         }
 
         // Check corner reference lines
-        if (_snapReferenceLinesCorners.Count > 0 && firstBusbar.Segments.Count >= 2)
+        if (_snapReferenceLinesCorners.Count > 0 && targetBusbar.Segments.Count >= 2)
         {
-            for (int i = 0; i < firstBusbar.Segments.Count - 1; i++)
+            for (int i = 0; i < targetBusbar.Segments.Count - 1; i++)
             {
-                var currentSegment = firstBusbar.Segments[i];
-                var nextSegment = firstBusbar.Segments[i + 1];
+                var currentSegment = targetBusbar.Segments[i];
+                var nextSegment = targetBusbar.Segments[i + 1];
 
                 // Get the corner point
                 Point2D cornerPoint = currentSegment.EndPoint;
@@ -3400,21 +3480,167 @@ public partial class MainWindow : Window
 
     private void Busbar_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (lstBusbars.SelectedIndex < 0 || lstBusbars.SelectedIndex >= _savedBusbars.Count)
+        try
+        {
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (lstBusbars.SelectedIndex < 0 || activeLayer == null || lstBusbars.SelectedIndex >= activeLayer.Busbars.Count)
+            {
+                return;
+            }
+
+            // Get the selected busbar from the model (single source of truth)
+            var selectedBusbar = activeLayer.Busbars[lstBusbars.SelectedIndex];
+            _lastActiveBusbar = selectedBusbar;
+
+            // Highlight the selected busbar (make start/end markers thicker)
+            HighlightBusbar(_lastActiveBusbar);
+
+            // Display its name in the textbox (temporarily unhook event to avoid triggering RefreshBusbarList)
+            txtBusbarName.TextChanged -= txtBusbarName_TextChanged;
+            txtBusbarName.Text = selectedBusbar.Name;
+            txtBusbarName.TextChanged += txtBusbarName_TextChanged;
+
+            // Display its segments in the right panel DataGrid (from model)
+            dgSegments.ItemsSource = null;
+            dgSegments.ItemsSource = selectedBusbar.Segments;
+
+            UpdateStatusBar($"Selected busbar: {selectedBusbar.Name} ({selectedBusbar.Segments.Count} segments)");
+        }
+        catch (Exception ex)
+        {
+            UpdateStatusBar($"Error selecting busbar: {ex.Message}");
+        }
+    }
+
+    private void txtBusbarName_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        // Skip if project not initialized yet (event fires during XAML initialization)
+        if (_currentProject == null)
         {
             return;
         }
 
-        // Get the selected busbar
-        var selectedBusbar = _savedBusbars[lstBusbars.SelectedIndex];
+        // Only update if a busbar is selected
+        int selectedIndex = lstBusbars.SelectedIndex;
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (selectedIndex < 0 || activeLayer == null || selectedIndex >= activeLayer.Busbars.Count)
+        {
+            return;
+        }
 
-        // Display its name in the textbox
-        txtBusbarName.Text = selectedBusbar.Name;
+        string newName = txtBusbarName.Text;
 
-        // Display its segments in the right panel DataGrid
+        // Update the Busbar model name (single source of truth)
+        activeLayer.Busbars[selectedIndex].Name = newName;
+
+        // Also update SavedBusbar for compatibility
+        if (selectedIndex < _savedBusbars.Count)
+        {
+            _savedBusbars[selectedIndex].Name = newName;
+        }
+
+        // Refresh the list from the model
+        RefreshBusbarList();
+        lstBusbars.SelectedIndex = selectedIndex;
+    }
+
+    private void HandleBusbarSegmentEdit(DataGridCellEditEndingEventArgs e)
+    {
+        string columnHeader = e.Column.Header?.ToString() ?? "";
+
+        // Only handle Angle and Length column edits
+        if (columnHeader != "Angle (°)" && columnHeader != "Length (mm)")
+        {
+            return;
+        }
+
+        int selectedBusbarIndex = lstBusbars.SelectedIndex;
+        var activeLayer = _currentProject?.GetActiveLayer();
+        if (selectedBusbarIndex < 0 || activeLayer == null || selectedBusbarIndex >= activeLayer.Busbars.Count)
+        {
+            return;
+        }
+
+        var busbar = activeLayer.Busbars[selectedBusbarIndex];
+
+        // Get the segment index from the row index instead of trying to find the item
+        // This avoids issues when the DataGrid is refreshed
+        int segmentIndex = e.Row.GetIndex();
+        if (segmentIndex < 0 || segmentIndex >= busbar.Segments.Count)
+        {
+            return;
+        }
+
+        var editedSegment = busbar.Segments[segmentIndex];
+
+        // Get the new value from the textbox
+        var textBox = e.EditingElement as System.Windows.Controls.TextBox;
+        if (textBox == null) return;
+
+        if (!double.TryParse(textBox.Text, out double newValue))
+        {
+            UpdateStatusBar($"Invalid {(columnHeader == "Angle (°)" ? "angle" : "length")} value.");
+            e.Cancel = true;
+            return;
+        }
+
+        Point2D startPoint = editedSegment.StartPoint;
+        Point2D newEndPoint;
+
+        if (columnHeader == "Angle (°)")
+        {
+            // Editing angle - keep length the same, change direction
+            double currentLength = editedSegment.Length;
+            double newAngleRadians = newValue * Math.PI / 180.0; // Convert degrees to radians
+
+            newEndPoint = new Point2D(
+                startPoint.X + currentLength * Math.Cos(newAngleRadians),
+                startPoint.Y + currentLength * Math.Sin(newAngleRadians)
+            );
+
+            UpdateStatusBar($"Segment {segmentIndex + 1} angle updated to {newValue:F1}°");
+        }
+        else // Length (mm)
+        {
+            // Editing length - keep angle the same, change length
+            if (newValue <= 0)
+            {
+                UpdateStatusBar("Invalid length value.");
+                e.Cancel = true;
+                return;
+            }
+
+            // Apply minimum length constraint
+            const double minimumSegmentLength = 50.0;
+            if (newValue < minimumSegmentLength)
+            {
+                newValue = minimumSegmentLength;
+                textBox.Text = newValue.ToString("F1");
+                UpdateStatusBar($"Length adjusted to minimum: {minimumSegmentLength}mm");
+            }
+
+            double currentAngle = editedSegment.AngleRadians;
+
+            newEndPoint = new Point2D(
+                startPoint.X + newValue * Math.Cos(currentAngle),
+                startPoint.Y + newValue * Math.Sin(currentAngle)
+            );
+
+            UpdateStatusBar($"Segment {segmentIndex + 1} length updated to {newValue:F1}mm");
+        }
+
+        // Move the busbar point - this will update the segment and propagate changes
+        // The point index is segmentIndex + 1 (since point 0 is the start of segment 0)
+        busbar.MoveBusbarPoint(segmentIndex + 1, newEndPoint);
+
+        // Redraw all busbars (to ensure proper visual update)
+        if (_busbarRenderer != null && activeLayer != null)
+        {
+            _busbarRenderer.RedrawAllBusbars(activeLayer, _lastActiveBusbar);
+        }
+
+        // Rebind the DataGrid to avoid stale references
         dgSegments.ItemsSource = null;
-        dgSegments.ItemsSource = selectedBusbar.Segments;
-
-        UpdateStatusBar($"Selected busbar: {selectedBusbar.Name} ({selectedBusbar.Segments.Count} segments)");
+        dgSegments.ItemsSource = busbar.Segments;
     }
 }

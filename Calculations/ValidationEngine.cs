@@ -92,7 +92,7 @@ namespace BusbarCAD.Calculations
             var lastSegment = busbar.Segments[busbar.Segments.Count - 1];
 
             // Rule 1: Both ends must be ≥ 50mm (absolute minimum)
-            if (firstSegment.InsideLength < ABSOLUTE_MIN_END)
+            if (firstSegment.Length < ABSOLUTE_MIN_END)
             {
                 if (firstSegment.WasForcedToMinimum)
                 {
@@ -100,11 +100,11 @@ namespace BusbarCAD.Calculations
                 }
                 else
                 {
-                    result.AddError($"First segment ({firstSegment.InsideLength:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
+                    result.AddError($"First segment ({firstSegment.Length:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
                 }
             }
 
-            if (lastSegment.InsideLength < ABSOLUTE_MIN_END)
+            if (lastSegment.Length < ABSOLUTE_MIN_END)
             {
                 if (lastSegment.WasForcedToMinimum)
                 {
@@ -112,25 +112,25 @@ namespace BusbarCAD.Calculations
                 }
                 else
                 {
-                    result.AddError($"Last segment ({lastSegment.InsideLength:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
+                    result.AddError($"Last segment ({lastSegment.Length:F1}mm) is below absolute minimum ({ABSOLUTE_MIN_END}mm)");
                 }
             }
 
             // Rule 2: At least one end must be ≥ 70mm
-            bool firstIsPreferred = firstSegment.InsideLength >= PREFERRED_MIN_END;
-            bool lastIsPreferred = lastSegment.InsideLength >= PREFERRED_MIN_END;
+            bool firstIsPreferred = firstSegment.Length >= PREFERRED_MIN_END;
+            bool lastIsPreferred = lastSegment.Length >= PREFERRED_MIN_END;
 
             if (!firstIsPreferred && !lastIsPreferred)
             {
                 if (firstSegment.WasForcedToMinimum || lastSegment.WasForcedToMinimum)
                 {
                     result.AddWarning($"Neither end segment meets preferred minimum ({PREFERRED_MIN_END}mm). " +
-                                    $"First: {firstSegment.InsideLength:F1}mm, Last: {lastSegment.InsideLength:F1}mm");
+                                    $"First: {firstSegment.Length:F1}mm, Last: {lastSegment.Length:F1}mm");
                 }
                 else
                 {
                     result.AddError($"Neither end segment meets preferred minimum ({PREFERRED_MIN_END}mm). " +
-                                  $"First: {firstSegment.InsideLength:F1}mm, Last: {lastSegment.InsideLength:F1}mm");
+                                  $"First: {firstSegment.Length:F1}mm, Last: {lastSegment.Length:F1}mm");
                 }
             }
 
@@ -151,7 +151,7 @@ namespace BusbarCAD.Calculations
             for (int i = 1; i < busbar.Segments.Count - 1; i++)
             {
                 var segment = busbar.Segments[i];
-                if (segment.InsideLength < MIN_MIDDLE)
+                if (segment.Length < MIN_MIDDLE)
                 {
                     if (segment.WasForcedToMinimum)
                     {
@@ -159,7 +159,7 @@ namespace BusbarCAD.Calculations
                     }
                     else
                     {
-                        result.AddError($"Middle segment {i} ({segment.InsideLength:F1}mm) is below minimum ({MIN_MIDDLE}mm)");
+                        result.AddError($"Middle segment {i} ({segment.Length:F1}mm) is below minimum ({MIN_MIDDLE}mm)");
                     }
                 }
             }
@@ -181,14 +181,14 @@ namespace BusbarCAD.Calculations
             if (segmentIndex == 0 || segmentIndex == busbar.Segments.Count - 1)
             {
                 // Highlight if below absolute minimum
-                if (segment.InsideLength < ABSOLUTE_MIN_END)
+                if (segment.Length < ABSOLUTE_MIN_END)
                     return true;
 
                 // Highlight if both ends are below preferred minimum
                 if (busbar.Segments.Count >= 2)
                 {
-                    var firstLength = busbar.Segments[0].InsideLength;
-                    var lastLength = busbar.Segments[busbar.Segments.Count - 1].InsideLength;
+                    var firstLength = busbar.Segments[0].Length;
+                    var lastLength = busbar.Segments[busbar.Segments.Count - 1].Length;
 
                     if (firstLength < PREFERRED_MIN_END && lastLength < PREFERRED_MIN_END)
                         return true;
@@ -197,7 +197,7 @@ namespace BusbarCAD.Calculations
             else
             {
                 // Middle segment - highlight if below minimum
-                if (segment.InsideLength < MIN_MIDDLE)
+                if (segment.Length < MIN_MIDDLE)
                     return true;
             }
 

@@ -35,7 +35,7 @@ namespace BusbarCAD.Export
                 {
                     var segment = busbar.Segments[i];
                     double angle = (i < busbar.Bends.Count) ? busbar.Bends[i].Angle : 0.0;
-                    sb.AppendLine($"<pfl> {i} {angle:F6} {segment.InsideLength:F6}");
+                    sb.AppendLine($"<pfl> {i} {angle:F6} {segment.Length:F6}");
                 }
                 else
                 {

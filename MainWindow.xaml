@@ -166,7 +166,7 @@
 
                     <!-- Busbar Name -->
                     <TextBlock Text="Busbar Name:" Margin="0,0,0,5"/>
-                    <TextBox Name="txtBusbarName" Text="a" Margin="0,0,0,15" FontSize="14"/>
+                    <TextBox Name="txtBusbarName" Text="a" Margin="0,0,0,15" FontSize="14" TextChanged="txtBusbarName_TextChanged"/>
 
                     <DataGrid Name="dgSegments"
                               AutoGenerateColumns="False"
@@ -178,8 +178,8 @@
                               CellEditEnding="DataGrid_CellEditEnding"
                               PreparingCellForEdit="DataGrid_PreparingCellForEdit">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Angle (°)" Binding="{Binding Angle}" Width="*" IsReadOnly="True"/>
-                            <DataGridTextColumn Header="Length (mm)" Binding="{Binding Length}" Width="*" IsReadOnly="False"/>
+                            <DataGridTextColumn Header="Angle (°)" Binding="{Binding Angle, StringFormat=F1, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="*" IsReadOnly="False"/>
+                            <DataGridTextColumn Header="Length (mm)" Binding="{Binding Length, StringFormat=F1, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="*" IsReadOnly="False"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </StackPanel>

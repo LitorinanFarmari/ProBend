@@ -22,7 +22,7 @@ namespace BusbarCAD.Calculations
             {
                 // Add straight section length
                 double straightLength = CalculateStraightLength(
-                    busbar.Segments[i].InsideLength,
+                    busbar.Segments[i].Length,
                     thickness,
                     toolRadius,
                     i < busbar.Bends.Count, // Has bend after this segment
@@ -122,7 +122,7 @@ namespace BusbarCAD.Calculations
             {
                 // Calculate straight section before this bend
                 double straightLength = CalculateStraightLength(
-                    busbar.Segments[i].InsideLength,
+                    busbar.Segments[i].Length,
                     thickness,
                     toolRadius,
                     true, // Has bend after
