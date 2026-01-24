@@ -19,6 +19,7 @@ public class SegmentInfo
 {
     public double Angle { get; set; } = 0;
     public double Length { get; set; } = 0;
+    public double BendAngle { get; set; } = 0;
 }
 
 /// <summary>
@@ -90,6 +91,27 @@ public partial class MainWindow : Window
 
     // Rendering
     private BusbarRenderer? _busbarRenderer = null;
+
+    // Move Points Mode
+    private bool _isMovePointsMode = false;
+    private List<(Busbar busbar, int pointIndex)> _selectedPoints = new List<(Busbar, int)>();
+    private MoveDirection _currentMoveDirection = MoveDirection.None;
+    private double _currentMoveDimension = 0;
+    private List<Ellipse> _selectedPointMarkers = new List<Ellipse>();
+    private Dictionary<(Busbar, int), Point2D> _originalPointPositions = new Dictionary<(Busbar, int), Point2D>();
+    private bool _hasPreviewMove = false;
+    private List<Ellipse> _allPointMarkers = new List<Ellipse>();
+    private bool _isDraggingMoveControls = false;
+    private System.Windows.Point _dragStartPoint;
+
+    public enum MoveDirection
+    {
+        None,
+        Up,
+        Down,
+        Left,
+        Right
+    }
 
     public MainWindow()
     {
@@ -359,6 +381,551 @@ public partial class MainWindow : Window
         AutoScaleToFitAll();
     }
 
+    private void MovePoints_Click(object sender, RoutedEventArgs e)
+    {
+        _isMovePointsMode = !_isMovePointsMode;
+
+        // Update button appearance
+        if (_isMovePointsMode)
+        {
+            btnMove.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 200));
+            UpdateStatusBar("Move Points mode - Click points to select, use arrows to set direction, type dimension and press Enter");
+
+            // Deactivate drawing mode
+            _isDrawing = false;
+
+            // Show move UI controls
+            ShowMoveControls();
+        }
+        else
+        {
+            btnMove.Background = System.Windows.Media.Brushes.Transparent;
+            UpdateStatusBar("Ready");
+
+            // Clear selections and hide controls
+            ClearPointSelection();
+            HideMoveControls();
+        }
+    }
+
+    private void ShowMoveControls()
+    {
+        moveControlsGrid.Visibility = Visibility.Visible;
+        txtMoveDimension.Text = "0";
+        _currentMoveDirection = MoveDirection.None;
+        ResetDirectionButtonColors();
+
+        // Show all busbar points
+        ShowAllBusbarPoints();
+    }
+
+    private void HideMoveControls()
+    {
+        moveControlsGrid.Visibility = Visibility.Collapsed;
+        txtMoveDimension.Text = "";
+        _currentMoveDimension = 0;
+
+        // Hide all busbar point markers
+        HideAllBusbarPoints();
+    }
+
+    private void ShowAllBusbarPoints()
+    {
+        // Clear existing point markers
+        HideAllBusbarPoints();
+
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        // Draw small circles at all busbar points
+        foreach (var busbar in currentLayer.Busbars)
+        {
+            for (int i = 0; i <= busbar.Segments.Count; i++)
+            {
+                var point = GetBusbarPoint(busbar, i);
+
+                var marker = new Ellipse
+                {
+                    Width = 6,
+                    Height = 6,
+                    Stroke = System.Windows.Media.Brushes.Gray,
+                    StrokeThickness = 1,
+                    Fill = System.Windows.Media.Brushes.White
+                };
+
+                Canvas.SetLeft(marker, point.X - 3);
+                Canvas.SetTop(marker, point.Y - 3);
+                drawingCanvas.Children.Add(marker);
+                _allPointMarkers.Add(marker);
+            }
+        }
+    }
+
+    private void HideAllBusbarPoints()
+    {
+        foreach (var marker in _allPointMarkers)
+        {
+            drawingCanvas.Children.Remove(marker);
+        }
+        _allPointMarkers.Clear();
+    }
+
+    private void ClearPointSelection()
+    {
+        _selectedPoints.Clear();
+
+        // Remove all visual markers
+        foreach (var marker in _selectedPointMarkers)
+        {
+            drawingCanvas.Children.Remove(marker);
+        }
+        _selectedPointMarkers.Clear();
+    }
+
+    private void MoveDirection_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Button btn && btn.Tag is string direction)
+        {
+            _currentMoveDirection = direction switch
+            {
+                "Up" => MoveDirection.Up,
+                "Down" => MoveDirection.Down,
+                "Left" => MoveDirection.Left,
+                "Right" => MoveDirection.Right,
+                _ => MoveDirection.None
+            };
+
+            ResetDirectionButtonColors();
+            HighlightDirectionButton(btn);
+
+            // Apply current dimension if any
+            if (_currentMoveDimension != 0)
+            {
+                PreviewMove();
+            }
+
+            // Focus the dimension input
+            txtMoveDimension.Focus();
+            txtMoveDimension.SelectAll();
+        }
+    }
+
+    private void ResetDirectionButtonColors()
+    {
+        btnMoveUp.Background = System.Windows.Media.Brushes.LightGray;
+        btnMoveDown.Background = System.Windows.Media.Brushes.LightGray;
+        btnMoveLeft.Background = System.Windows.Media.Brushes.LightGray;
+        btnMoveRight.Background = System.Windows.Media.Brushes.LightGray;
+    }
+
+    private void HighlightDirectionButton(System.Windows.Controls.Button btn)
+    {
+        btn.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(100, 150, 255));
+    }
+
+    private void MoveDimension_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            ApplyMove();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            CancelMove();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Up)
+        {
+            _currentMoveDirection = MoveDirection.Up;
+            ResetDirectionButtonColors();
+            HighlightDirectionButton(btnMoveUp);
+            PreviewMove();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Down)
+        {
+            _currentMoveDirection = MoveDirection.Down;
+            ResetDirectionButtonColors();
+            HighlightDirectionButton(btnMoveDown);
+            PreviewMove();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Left)
+        {
+            _currentMoveDirection = MoveDirection.Left;
+            ResetDirectionButtonColors();
+            HighlightDirectionButton(btnMoveLeft);
+            PreviewMove();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Right)
+        {
+            _currentMoveDirection = MoveDirection.Right;
+            ResetDirectionButtonColors();
+            HighlightDirectionButton(btnMoveRight);
+            PreviewMove();
+            e.Handled = true;
+        }
+    }
+
+    private void MoveDimension_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (double.TryParse(txtMoveDimension.Text, out double dimension))
+        {
+            _currentMoveDimension = dimension;
+            if (_currentMoveDirection != MoveDirection.None)
+            {
+                PreviewMove();
+            }
+        }
+    }
+
+    private void PreviewMove()
+    {
+        if (_selectedPoints.Count == 0 || _currentMoveDirection == MoveDirection.None)
+            return;
+
+        // Restore all previously moved points to original positions before applying new preview
+        if (_hasPreviewMove)
+        {
+            foreach (var (key, originalPos) in _originalPointPositions.ToList())
+            {
+                SetBusbarPointDirect(key.Item1, key.Item2, originalPos);
+            }
+        }
+
+        // Update original positions for all currently selected points
+        // This handles the case where points were added or removed from selection
+        foreach (var (busbar, pointIndex) in _selectedPoints)
+        {
+            if (!_originalPointPositions.ContainsKey((busbar, pointIndex)))
+            {
+                var point = GetBusbarPoint(busbar, pointIndex);
+                _originalPointPositions[(busbar, pointIndex)] = new Point2D(point.X, point.Y);
+            }
+        }
+
+        // Remove original positions for points that are no longer selected
+        var pointsToRemove = _originalPointPositions.Keys
+            .Where(key => !_selectedPoints.Contains(key))
+            .ToList();
+        foreach (var key in pointsToRemove)
+        {
+            _originalPointPositions.Remove(key);
+        }
+
+        _hasPreviewMove = true;
+
+        // Calculate offset based on direction and dimension
+        Point2D offset = _currentMoveDirection switch
+        {
+            MoveDirection.Up => new Point2D(0, -_currentMoveDimension),
+            MoveDirection.Down => new Point2D(0, _currentMoveDimension),
+            MoveDirection.Left => new Point2D(-_currentMoveDimension, 0),
+            MoveDirection.Right => new Point2D(_currentMoveDimension, 0),
+            _ => new Point2D(0, 0)
+        };
+
+        // Apply move from original positions (only the selected points, no propagation)
+        foreach (var (busbar, pointIndex) in _selectedPoints)
+        {
+            var originalPoint = _originalPointPositions[(busbar, pointIndex)];
+            var newPoint = new Point2D(originalPoint.X + offset.X, originalPoint.Y + offset.Y);
+            SetBusbarPointDirect(busbar, pointIndex, newPoint);
+        }
+
+        // Redraw all busbars
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer != null)
+        {
+            _busbarRenderer?.RedrawAllBusbars(activeLayer);
+        }
+
+        // Update DataGrid if a busbar is selected
+        if (lstBusbars.SelectedIndex >= 0 && lstBusbars.SelectedItem is Busbar selectedBusbar)
+        {
+            dgSegments.ItemsSource = null;
+            dgSegments.ItemsSource = selectedBusbar.Segments;
+        }
+    }
+
+    /// <summary>
+    /// Sets a busbar point position directly without propagating to subsequent points.
+    /// This is used by the Move Points tool to move only selected points independently.
+    /// </summary>
+    private void SetBusbarPointDirect(Busbar busbar, int pointIndex, Point2D newPosition)
+    {
+        if (busbar.Segments.Count == 0) return;
+        if (pointIndex < 0 || pointIndex > busbar.Segments.Count) return;
+
+        // Update the segment(s) that use this point
+        if (pointIndex > 0)
+        {
+            // Update the EndPoint of the segment before this point
+            busbar.Segments[pointIndex - 1].EndPoint = newPosition;
+        }
+
+        if (pointIndex < busbar.Segments.Count)
+        {
+            // Update the StartPoint of the segment at this point
+            busbar.Segments[pointIndex].StartPoint = newPosition;
+        }
+
+        // Special case: if this is the last point, also update the last segment's endpoint
+        if (pointIndex == busbar.Segments.Count && busbar.Segments.Count > 0)
+        {
+            busbar.Segments[busbar.Segments.Count - 1].EndPoint = newPosition;
+        }
+    }
+
+    private void ApplyMove()
+    {
+        if (_selectedPoints.Count == 0 || _currentMoveDirection == MoveDirection.None)
+            return;
+
+        // Move is already applied by PreviewMove, just clear state
+        int pointCount = _selectedPoints.Count;
+
+        // Recalculate bend angles for all affected busbars
+        var affectedBusbars = _selectedPoints.Select(p => p.busbar).Distinct().ToList();
+        foreach (var busbar in affectedBusbars)
+        {
+            RecalculateBendAngles(busbar);
+        }
+
+        // Redraw all busbars
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer != null)
+        {
+            _busbarRenderer?.RedrawAllBusbars(activeLayer);
+        }
+
+        ClearPointSelection();
+        txtMoveDimension.Text = "0";
+        _currentMoveDimension = 0;
+        _currentMoveDirection = MoveDirection.None;
+        ResetDirectionButtonColors();
+        _originalPointPositions.Clear();
+        _hasPreviewMove = false;
+
+        UpdateStatusBar($"Move applied to {pointCount} point(s)");
+
+        // Exit move mode
+        _isMovePointsMode = false;
+        btnMove.ClearValue(System.Windows.Controls.Control.BackgroundProperty);
+        HideMoveControls();
+
+        // Force DataGrid refresh AFTER exiting move mode
+        if (lstBusbars.SelectedIndex >= 0 && activeLayer != null && lstBusbars.SelectedIndex < activeLayer.Busbars.Count)
+        {
+            var selectedBusbar = activeLayer.Busbars[lstBusbars.SelectedIndex];
+            dgSegments.ItemsSource = null;
+            dgSegments.ItemsSource = new List<Segment>(selectedBusbar.Segments);
+        }
+
+        UpdateStatusBar("Ready");
+    }
+
+    /// <summary>
+    /// Recalculates bend angles and updates both Bend objects and Segment.BendAngle based on current geometry
+    /// </summary>
+    private void RecalculateBendAngles(Busbar busbar)
+    {
+        // Update bend angles based on current segment directions
+        for (int i = 0; i < busbar.Segments.Count - 1; i++)
+        {
+            var seg1 = busbar.Segments[i];
+            var seg2 = busbar.Segments[i + 1];
+
+            // Calculate angle between segments
+            double angle1 = seg1.AngleRadians;
+            double angle2 = seg2.AngleRadians;
+            double bendAngle = (angle2 - angle1) * 180.0 / Math.PI;
+
+            // Normalize to -180 to 180
+            while (bendAngle > 180) bendAngle -= 360;
+            while (bendAngle < -180) bendAngle += 360;
+
+            // Update the bend object
+            if (i < busbar.Bends.Count)
+            {
+                busbar.Bends[i].Angle = bendAngle;
+            }
+
+            // Update the segment's BendAngle (for the segment after the bend)
+            if (i + 1 < busbar.Segments.Count)
+            {
+                busbar.Segments[i + 1].BendAngle = bendAngle;
+            }
+        }
+
+        // First segment always has 0 bend angle
+        if (busbar.Segments.Count > 0)
+        {
+            busbar.Segments[0].BendAngle = 0;
+        }
+    }
+
+    private void CancelMove()
+    {
+        // Restore original positions if there was a preview
+        if (_hasPreviewMove)
+        {
+            foreach (var (key, originalPos) in _originalPointPositions)
+            {
+                SetBusbarPointDirect(key.Item1, key.Item2, originalPos);
+            }
+
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null)
+            {
+                _busbarRenderer?.RedrawAllBusbars(activeLayer);
+            }
+
+            // Update DataGrid if needed
+            if (lstBusbars.SelectedIndex >= 0 && lstBusbars.SelectedItem is Busbar selectedBusbar)
+            {
+                dgSegments.ItemsSource = null;
+                dgSegments.ItemsSource = selectedBusbar.Segments;
+            }
+        }
+
+        // Don't clear point selection - keep points selected so user can try a different move
+        txtMoveDimension.Text = "0";
+        _currentMoveDimension = 0;
+        _currentMoveDirection = MoveDirection.None;
+        ResetDirectionButtonColors();
+        _originalPointPositions.Clear();
+        _hasPreviewMove = false;
+
+        UpdateStatusBar("Move cancelled");
+    }
+
+    private Point2D GetBusbarPoint(Busbar busbar, int pointIndex)
+    {
+        if (pointIndex == 0)
+            return busbar.Segments[0].StartPoint;
+        else
+            return busbar.Segments[pointIndex - 1].EndPoint;
+    }
+
+    private void MoveDragHandle_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.LeftButton == MouseButtonState.Pressed)
+        {
+            _isDraggingMoveControls = true;
+            _dragStartPoint = e.GetPosition(drawingCanvas);
+            moveDragHandle.CaptureMouse();
+            e.Handled = true;
+        }
+    }
+
+    private void MoveDragHandle_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_isDraggingMoveControls && e.LeftButton == MouseButtonState.Pressed)
+        {
+            var currentPos = e.GetPosition(drawingCanvas);
+            var offset = currentPos - _dragStartPoint;
+
+            double newLeft = Canvas.GetLeft(moveControlsGrid) + offset.X;
+            double newTop = Canvas.GetTop(moveControlsGrid) + offset.Y;
+
+            // Keep within canvas bounds
+            newLeft = Math.Max(0, Math.Min(newLeft, drawingCanvas.ActualWidth - moveControlsGrid.ActualWidth));
+            newTop = Math.Max(0, Math.Min(newTop, drawingCanvas.ActualHeight - moveControlsGrid.ActualHeight));
+
+            Canvas.SetLeft(moveControlsGrid, newLeft);
+            Canvas.SetTop(moveControlsGrid, newTop);
+
+            _dragStartPoint = currentPos;
+            e.Handled = true;
+        }
+    }
+
+    private void MoveDragHandle_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_isDraggingMoveControls)
+        {
+            _isDraggingMoveControls = false;
+            moveDragHandle.ReleaseMouseCapture();
+            e.Handled = true;
+        }
+    }
+
+    private void HandlePointSelection(MouseButtonEventArgs e)
+    {
+        var clickPos = GetCanvasMousePosition(e);
+        const double selectionRadius = 10.0; // Distance threshold for selecting a point
+
+        // Find the nearest point within selection radius
+        Busbar? nearestBusbar = null;
+        int nearestPointIndex = -1;
+        double nearestDistance = selectionRadius;
+
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        // Check all busbars and their points
+        foreach (var busbar in currentLayer.Busbars)
+        {
+            for (int i = 0; i <= busbar.Segments.Count; i++)
+            {
+                var point = GetBusbarPoint(busbar, i);
+                double distance = point.DistanceTo(clickPos);
+
+                if (distance < nearestDistance)
+                {
+                    nearestDistance = distance;
+                    nearestBusbar = busbar;
+                    nearestPointIndex = i;
+                }
+            }
+        }
+
+        // If we found a point, toggle its selection
+        if (nearestBusbar != null && nearestPointIndex >= 0)
+        {
+            var pointKey = (nearestBusbar, nearestPointIndex);
+            int existingIndex = _selectedPoints.FindIndex(p => p.busbar == nearestBusbar && p.pointIndex == nearestPointIndex);
+
+            if (existingIndex >= 0)
+            {
+                // Deselect: remove from list and remove visual marker
+                _selectedPoints.RemoveAt(existingIndex);
+                if (existingIndex < _selectedPointMarkers.Count)
+                {
+                    drawingCanvas.Children.Remove(_selectedPointMarkers[existingIndex]);
+                    _selectedPointMarkers.RemoveAt(existingIndex);
+                }
+                UpdateStatusBar($"Point deselected. {_selectedPoints.Count} point(s) selected.");
+            }
+            else
+            {
+                // Select: add to list and add visual marker
+                _selectedPoints.Add(pointKey);
+
+                var point = GetBusbarPoint(nearestBusbar, nearestPointIndex);
+
+                var marker = new Ellipse
+                {
+                    Width = 8,
+                    Height = 8,
+                    Stroke = System.Windows.Media.Brushes.Blue,
+                    StrokeThickness = 2,
+                    Fill = System.Windows.Media.Brushes.Transparent
+                };
+
+                Canvas.SetLeft(marker, point.X - 4);
+                Canvas.SetTop(marker, point.Y - 4);
+                drawingCanvas.Children.Add(marker);
+                _selectedPointMarkers.Add(marker);
+
+                UpdateStatusBar($"Point selected. {_selectedPoints.Count} point(s) selected. Use arrows to set direction, type dimension and press Enter.");
+            }
+        }
+    }
+
     private void Hand_Click(object sender, RoutedEventArgs e)
     {
         _handToolActive = !_handToolActive;
@@ -500,7 +1067,8 @@ public partial class MainWindow : Window
         var segment = new SegmentInfo
         {
             Angle = angle,
-            Length = length
+            Length = length,
+            BendAngle = angle  // Bend angle is the same as the segment angle (relative to previous segment)
         };
         _currentSegments.Add(segment);
         UpdateSegmentList();
@@ -599,6 +1167,16 @@ public partial class MainWindow : Window
                 if (i < _segmentsForcedToMinimum.Count)
                 {
                     segment.WasForcedToMinimum = _segmentsForcedToMinimum[i];
+                }
+
+                // Set bend angle: 0 for first segment, otherwise the angle of the previous bend
+                if (i == 0)
+                {
+                    segment.BendAngle = 0;
+                }
+                else if (i > 0 && busbar.Bends.Count > 0)
+                {
+                    segment.BendAngle = busbar.Bends[i - 1].Angle;
                 }
 
                 busbar.AddSegment(segment);
@@ -923,6 +1501,13 @@ public partial class MainWindow : Window
     // Canvas Event Handlers
     private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        // Handle Move Points mode
+        if (_isMovePointsMode)
+        {
+            HandlePointSelection(e);
+            return;
+        }
+
         if (!_isDrawing) return;
 
         // Don't interfere with panning
@@ -1912,7 +2497,8 @@ public partial class MainWindow : Window
         tempSegments.Add(new SegmentInfo
         {
             Angle = previewAngle,
-            Length = lengthOverride ?? previewLength
+            Length = lengthOverride ?? previewLength,
+            BendAngle = previewAngle
         });
 
         // Update the DataGrid with the preview
@@ -3423,9 +4009,76 @@ public partial class MainWindow : Window
     // Keyboard Shortcuts
     private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        // Handle arrow keys in Move Points mode (only if not typing in dimension box)
+        if (_isMovePointsMode && !txtMoveDimension.IsFocused)
+        {
+            if (e.Key == Key.Up)
+            {
+                _currentMoveDirection = MoveDirection.Up;
+                ResetDirectionButtonColors();
+                HighlightDirectionButton(btnMoveUp);
+                txtMoveDimension.Focus();
+                txtMoveDimension.SelectAll();
+                if (_currentMoveDimension != 0) PreviewMove();
+                e.Handled = true;
+                return;
+            }
+            else if (e.Key == Key.Down)
+            {
+                _currentMoveDirection = MoveDirection.Down;
+                ResetDirectionButtonColors();
+                HighlightDirectionButton(btnMoveDown);
+                txtMoveDimension.Focus();
+                txtMoveDimension.SelectAll();
+                if (_currentMoveDimension != 0) PreviewMove();
+                e.Handled = true;
+                return;
+            }
+            else if (e.Key == Key.Left)
+            {
+                _currentMoveDirection = MoveDirection.Left;
+                ResetDirectionButtonColors();
+                HighlightDirectionButton(btnMoveLeft);
+                txtMoveDimension.Focus();
+                txtMoveDimension.SelectAll();
+                if (_currentMoveDimension != 0) PreviewMove();
+                e.Handled = true;
+                return;
+            }
+            else if (e.Key == Key.Right)
+            {
+                _currentMoveDirection = MoveDirection.Right;
+                ResetDirectionButtonColors();
+                HighlightDirectionButton(btnMoveRight);
+                txtMoveDimension.Focus();
+                txtMoveDimension.SelectAll();
+                if (_currentMoveDimension != 0) PreviewMove();
+                e.Handled = true;
+                return;
+            }
+        }
+
         if (e.Key == Key.D && !_isDrawing)
         {
             StartDrawing();
+        }
+        else if (e.Key == Key.M && !_isDrawing)
+        {
+            MovePoints_Click(this, new RoutedEventArgs());
+        }
+        else if (e.Key == Key.Escape && _isMovePointsMode)
+        {
+            if (_hasPreviewMove)
+            {
+                // Cancel the current move but stay in move mode
+                CancelMove();
+            }
+            else
+            {
+                // No active preview, exit move mode completely
+                MovePoints_Click(this, new RoutedEventArgs());
+            }
+            e.Handled = true;
         }
         else if (e.Key == Key.Tab && _isDrawing && !_waitingForLengthInput)
         {
@@ -3589,16 +4242,42 @@ public partial class MainWindow : Window
 
         if (columnHeader == "Angle (°)")
         {
-            // Editing angle - keep length the same, change direction
-            double currentLength = editedSegment.Length;
-            double newAngleRadians = newValue * Math.PI / 180.0; // Convert degrees to radians
+            // Editing bend angle
+            if (segmentIndex == 0)
+            {
+                // First segment has no bend before it, angle must be 0
+                textBox.Text = "0";
+                e.Cancel = true;
+                UpdateStatusBar("First segment bend angle is always 0°");
+                return;
+            }
 
-            newEndPoint = new Point2D(
-                startPoint.X + currentLength * Math.Cos(newAngleRadians),
-                startPoint.Y + currentLength * Math.Sin(newAngleRadians)
-            );
+            // Update the bend angle
+            int bendIndex = segmentIndex - 1;
+            if (bendIndex >= 0 && bendIndex < busbar.Bends.Count)
+            {
+                busbar.Bends[bendIndex].Angle = newValue;
+                editedSegment.BendAngle = newValue;
 
-            UpdateStatusBar($"Segment {segmentIndex + 1} angle updated to {newValue:F1}°");
+                // Calculate new direction: previous segment's direction + bend angle
+                var previousSegment = busbar.Segments[segmentIndex - 1];
+                double previousAngle = previousSegment.AngleRadians;
+                double newAngleRadians = previousAngle + (newValue * Math.PI / 180.0);
+
+                double currentLength = editedSegment.Length;
+                newEndPoint = new Point2D(
+                    startPoint.X + currentLength * Math.Cos(newAngleRadians),
+                    startPoint.Y + currentLength * Math.Sin(newAngleRadians)
+                );
+
+                UpdateStatusBar($"Bend angle updated to {newValue:F1}°");
+            }
+            else
+            {
+                UpdateStatusBar("Invalid bend index");
+                e.Cancel = true;
+                return;
+            }
         }
         else // Length (mm)
         {

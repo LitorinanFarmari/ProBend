@@ -46,6 +46,12 @@
                     <TextBlock Text="Draw"/>
                 </StackPanel>
             </Button>
+            <Button Name="btnMove" Click="MovePoints_Click" ToolTip="Move Points (M)">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="⊕" FontSize="16" Margin="0,0,5,0"/>
+                    <TextBlock Text="Move"/>
+                </StackPanel>
+            </Button>
             <Separator/>
             <Button Name="btnZoomIn" Click="ZoomIn_Click" ToolTip="Zoom In (+)">
                 <StackPanel Orientation="Horizontal">
@@ -156,6 +162,45 @@
                                Foreground="#999999"
                                TextAlignment="Center"
                                IsHitTestVisible="False"/>
+
+                    <!-- Move Points Controls (Hidden by default) -->
+                    <Grid Name="moveControlsGrid" Visibility="Collapsed" Canvas.Left="20" Canvas.Top="20" Width="84" Height="90">
+                        <!-- Drag Handle -->
+                        <Border Name="moveDragHandle" Width="84" Height="12" VerticalAlignment="Top" Background="#E0E0E0"
+                                BorderBrush="#AAAAAA" BorderThickness="1" CornerRadius="2"
+                                MouseLeftButtonDown="MoveDragHandle_MouseDown" MouseMove="MoveDragHandle_MouseMove" MouseLeftButtonUp="MoveDragHandle_MouseUp"
+                                Cursor="SizeAll">
+                            <TextBlock Text="⋮⋮⋮" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="8" Foreground="#666666"/>
+                        </Border>
+
+                        <!-- Arrow Controls (shifted down to make room for drag handle) -->
+                        <Grid Margin="0,12,0,0">
+                            <!-- Up Arrow -->
+                            <Button Name="btnMoveUp" Width="28" Height="21" HorizontalAlignment="Center" VerticalAlignment="Top" Click="MoveDirection_Click" Tag="Up" Background="LightGray">
+                                <TextBlock Text="↑" FontSize="14" FontWeight="Bold"/>
+                            </Button>
+
+                            <!-- Down Arrow -->
+                            <Button Name="btnMoveDown" Width="28" Height="21" HorizontalAlignment="Center" VerticalAlignment="Bottom" Click="MoveDirection_Click" Tag="Down" Background="LightGray">
+                                <TextBlock Text="↓" FontSize="14" FontWeight="Bold"/>
+                            </Button>
+
+                            <!-- Left Arrow -->
+                            <Button Name="btnMoveLeft" Width="21" Height="28" HorizontalAlignment="Left" VerticalAlignment="Center" Click="MoveDirection_Click" Tag="Left" Background="LightGray">
+                                <TextBlock Text="←" FontSize="14" FontWeight="Bold"/>
+                            </Button>
+
+                            <!-- Right Arrow -->
+                            <Button Name="btnMoveRight" Width="21" Height="28" HorizontalAlignment="Right" VerticalAlignment="Center" Click="MoveDirection_Click" Tag="Right" Background="LightGray">
+                                <TextBlock Text="→" FontSize="14" FontWeight="Bold"/>
+                            </Button>
+
+                            <!-- Center Dimension Input -->
+                            <TextBox Name="txtMoveDimension" Width="35" Height="21" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                     TextAlignment="Center" FontSize="10" Background="White"
+                                     PreviewKeyDown="MoveDimension_KeyDown" TextChanged="MoveDimension_TextChanged"/>
+                        </Grid>
+                    </Grid>
                 </Canvas>
             </Border>
 
@@ -178,7 +223,7 @@
                               CellEditEnding="DataGrid_CellEditEnding"
                               PreparingCellForEdit="DataGrid_PreparingCellForEdit">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Angle (°)" Binding="{Binding Angle, StringFormat=F1, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="*" IsReadOnly="False"/>
+                            <DataGridTextColumn Header="Angle (°)" Binding="{Binding BendAngle, StringFormat=F1, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="*" IsReadOnly="False"/>
                             <DataGridTextColumn Header="Length (mm)" Binding="{Binding Length, StringFormat=F1, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" Width="*" IsReadOnly="False"/>
                         </DataGrid.Columns>
                     </DataGrid>

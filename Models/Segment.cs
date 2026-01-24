@@ -18,12 +18,16 @@ namespace BusbarCAD.Models
         public double StartTrimDistance { get; set; } // Trim at start (0 for first segment)
         public double EndTrimDistance { get; set; }   // Trim at end (0 for last segment)
 
+        // Bend angle before this segment (0 for first segment, bend angle for subsequent segments)
+        public double BendAngle { get; set; }
+
         public Segment(Point2D start, Point2D end)
         {
             StartPoint = start;
             EndPoint = end;
             StartTrimDistance = 0;
             EndTrimDistance = 0;
+            BendAngle = 0;
         }
 
         /// <summary>
