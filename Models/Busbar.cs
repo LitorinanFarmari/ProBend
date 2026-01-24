@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Windows;
 using System.Windows.Shapes;
 
 namespace BusbarCAD.Models
@@ -12,7 +13,7 @@ namespace BusbarCAD.Models
         public double FlatLength { get; set; }
 
         // Visual elements (for rendering and cleanup)
-        public List<Shape> VisualShapes { get; set; } = new List<Shape>();
+        public List<UIElement> VisualShapes { get; set; } = new List<UIElement>();
         public Line? StartMarker { get; set; } = null;
         public Line? EndMarker { get; set; } = null;
 
@@ -133,6 +134,21 @@ namespace BusbarCAD.Models
             {
                 Segments[Segments.Count - 1].EndPoint = newPosition;
             }
+        }
+
+        /// <summary>
+        /// Calculates the total cut length of the busbar.
+        /// For now, this is a simple sum of all segment lengths.
+        /// Will be improved later to account for bend allowances and trim distances.
+        /// </summary>
+        public double CalculateCutLength()
+        {
+            double totalLength = 0;
+            foreach (var segment in Segments)
+            {
+                totalLength += segment.Length;
+            }
+            return totalLength;
         }
 
         public override string ToString()

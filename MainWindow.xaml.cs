@@ -635,6 +635,13 @@ public partial class MainWindow : Window
             SetBusbarPointDirect(busbar, pointIndex, newPoint);
         }
 
+        // Recalculate bend angles for all affected busbars during preview
+        var affectedBusbars = _selectedPoints.Select(p => p.busbar).Distinct().ToList();
+        foreach (var busbar in affectedBusbars)
+        {
+            RecalculateBendAngles(busbar);
+        }
+
         // Redraw all busbars
         var activeLayer = _currentProject.GetActiveLayer();
         if (activeLayer != null)
@@ -4061,10 +4068,12 @@ public partial class MainWindow : Window
         if (e.Key == Key.D && !_isDrawing)
         {
             StartDrawing();
+            e.Handled = true;
         }
         else if (e.Key == Key.M && !_isDrawing)
         {
             MovePoints_Click(this, new RoutedEventArgs());
+            e.Handled = true;
         }
         else if (e.Key == Key.Escape && _isMovePointsMode)
         {

@@ -69,19 +69,19 @@ namespace BusbarCAD.Rendering
                     lineEnd = TrimLineEnd(p1, p2, p3, bendRadius);
                 }
 
-                // Draw centerline
-                var centerLine = new Line
-                {
-                    X1 = lineStart.X,
-                    Y1 = lineStart.Y,
-                    X2 = lineEnd.X,
-                    Y2 = lineEnd.Y,
-                    Stroke = Brushes.LightGray,
-                    StrokeThickness = 1,
-                    IsHitTestVisible = false
-                };
-                _canvas.Children.Add(centerLine);
-                busbar.VisualShapes.Add(centerLine);
+                // Draw centerline (disabled for now)
+                // var centerLine = new Line
+                // {
+                //     X1 = lineStart.X,
+                //     Y1 = lineStart.Y,
+                //     X2 = lineEnd.X,
+                //     Y2 = lineEnd.Y,
+                //     Stroke = Brushes.LightGray,
+                //     StrokeThickness = 1,
+                //     IsHitTestVisible = false
+                // };
+                // _canvas.Children.Add(centerLine);
+                // busbar.VisualShapes.Add(centerLine);
 
                 // Draw edge lines
                 DrawEdgeLines(busbar, lineStart, lineEnd, halfWidth);
@@ -92,6 +92,9 @@ namespace BusbarCAD.Rendering
                     var p3 = points[i + 2];
                     DrawBendArc(busbar, p1, p2, p3, bendRadius, halfWidth);
                 }
+
+                // Draw length label for this segment
+                DrawSegmentLengthLabel(busbar, lineStart, lineEnd, i, thickness);
             }
 
             // Draw end marker (blue perpendicular line)
@@ -217,6 +220,98 @@ namespace BusbarCAD.Rendering
             return line;
         }
 
+        private void DrawSegmentLengthLabel(Busbar busbar, Point2D start, Point2D end, int segmentIndex, double busbarThickness)
+        {
+            var segment = busbar.Segments[segmentIndex];
+            double length = segment.Length;
+            double bendAngle = segment.BendAngle;
+
+            // Calculate segment center point
+            double centerX = (start.X + end.X) / 2.0;
+            double centerY = (start.Y + end.Y) / 2.0;
+
+            // Calculate segment angle in degrees
+            double dx = end.X - start.X;
+            double dy = end.Y - start.Y;
+            double angleRadians = Math.Atan2(dy, dx);
+            double angleDegrees = angleRadians * 180.0 / Math.PI;
+
+            // Apply small perpendicular offset to move text "up" by 1mm
+            double segmentLength = Math.Sqrt(dx * dx + dy * dy);
+            if (segmentLength > 0.1)
+            {
+                double perpX = dy / segmentLength;
+                double perpY = -dx / segmentLength;
+                double offsetDistance = 1.0; // 1mm upward offset
+                centerX += perpX * offsetDistance;
+                centerY += perpY * offsetDistance;
+            }
+
+            // Normalize angle to -90 to +90 range for text readability
+            // (so text doesn't appear upside down)
+            if (angleDegrees > 90)
+                angleDegrees -= 180;
+            else if (angleDegrees < -90)
+                angleDegrees += 180;
+
+            // Font size is 80% of busbar thickness
+            double fontSize = busbarThickness * 0.8;
+
+            // Format text based on segment position
+            string text;
+            if (segmentIndex == 0)
+            {
+                // First segment shows cut length and segment length
+                double cutLength = busbar.CalculateCutLength();
+                text = $"{cutLength:F1} | {length:F1}";
+            }
+            else if (Math.Abs(bendAngle) != 90)
+            {
+                // Other segments show bend angle and length (skip if angle is 90 or -90)
+                text = $"{bendAngle:F1}° / {length:F1}";
+            }
+            else
+            {
+                // If angle is 90 or -90, just show length
+                text = $"{length:F1}";
+            }
+
+            // Create text label
+            var textBlock = new TextBlock
+            {
+                Text = text,
+                FontSize = fontSize,
+                Foreground = Brushes.Black,
+                FontWeight = FontWeights.Normal,
+                IsHitTestVisible = false
+            };
+
+            // Measure the text to get its actual width and height
+            var formattedText = new FormattedText(
+                text,
+                System.Globalization.CultureInfo.CurrentCulture,
+                System.Windows.FlowDirection.LeftToRight,
+                new Typeface(textBlock.FontFamily, textBlock.FontStyle, textBlock.FontWeight, textBlock.FontStretch),
+                fontSize,
+                Brushes.Black,
+                1.0);
+
+            double textWidth = formattedText.Width;
+            double textHeight = formattedText.Height;
+
+            // Position text so its center is at the segment center
+            // Offset by half width and half height
+            Canvas.SetLeft(textBlock, centerX - textWidth / 2.0);
+            Canvas.SetTop(textBlock, centerY - textHeight / 2.0);
+
+            // Rotate around the text's own center (0.5, 0.5 in relative coordinates)
+            textBlock.RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
+            textBlock.RenderTransform = new RotateTransform(angleDegrees);
+
+            _canvas.Children.Add(textBlock);
+            busbar.VisualShapes.Add(textBlock);
+        }
+
         private void DrawEdgeLines(Busbar busbar, Point2D start, Point2D end, double halfWidth)
         {
             double dx = end.X - start.X;
@@ -308,13 +403,13 @@ namespace BusbarCAD.Rendering
             double cross = u1x * u2y - u1y * u2x;
             bool sweepClockwise = cross > 0;
 
-            // Draw centerline arc
-            var centerArc = CreateArcFromPoints(arcStart, arcEnd, bendRadius, sweepClockwise, Brushes.LightGray, 1);
-            if (centerArc != null)
-            {
-                _canvas.Children.Add(centerArc);
-                busbar.VisualShapes.Add(centerArc);
-            }
+            // Draw centerline arc (disabled for now)
+            // var centerArc = CreateArcFromPoints(arcStart, arcEnd, bendRadius, sweepClockwise, Brushes.LightGray, 1);
+            // if (centerArc != null)
+            // {
+            //     _canvas.Children.Add(centerArc);
+            //     busbar.VisualShapes.Add(centerArc);
+            // }
 
             // Draw edge arcs (inner and outer)
             DrawEdgeArcs(busbar, p1, p2, p3, bendRadius, halfWidth);
