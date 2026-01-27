@@ -81,10 +81,10 @@ namespace BusbarCAD.Models
         }
 
         /// <summary>
-        /// Effective cut length contribution (length minus trim distances)
-        /// Used for calculating total flat/cut length of busbar
+        /// Straight section length (length minus trim distances for bends)
+        /// This is the actual straight material length of this segment after accounting for bend trimming
         /// </summary>
-        public double CutLengthContribution => Length - StartTrimDistance - EndTrimDistance;
+        public double StraightSectionLength => Length - StartTrimDistance - EndTrimDistance;
 
         public override string ToString()
         {

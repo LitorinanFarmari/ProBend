@@ -115,13 +115,13 @@
                     </ComboBox>
 
                     <TextBlock Text="Layer Spacing (mm):" Margin="0,10,0,2"/>
-                    <TextBox Name="txtLayerSpacing" Text="20"/>
+                    <TextBox Name="txtLayerSpacing" Text="20" LostFocus="MaterialSettings_Changed"/>
 
                     <TextBlock Text="Bend Tool Radius (mm):" Margin="0,10,0,2"/>
-                    <TextBox Name="txtToolRadius" Text="20"/>
+                    <TextBox Name="txtToolRadius" Text="20" LostFocus="MaterialSettings_Changed"/>
 
                     <TextBlock Text="K-Factor:" Margin="0,10,0,2"/>
-                    <TextBox Name="txtKFactor" Text="0.45"/>
+                    <TextBox Name="txtKFactor" Text="0.9" LostFocus="MaterialSettings_Changed"/>
 
                     <TextBlock Text="Thickness (mm):" Margin="0,10,0,2"/>
                     <TextBox Name="txtThickness" Text="10" IsReadOnly="True" Background="#E0E0E0"/>

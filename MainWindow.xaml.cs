@@ -4140,6 +4140,42 @@ public partial class MainWindow : Window
         }
     }
 
+    private void MaterialSettings_Changed(object sender, RoutedEventArgs e)
+    {
+        // Check if project is initialized (this event fires during InitializeComponent)
+        if (_currentProject == null) return;
+
+        try
+        {
+            // Update material settings from textboxes
+            if (double.TryParse(txtLayerSpacing.Text, out double layerSpacing))
+            {
+                _currentProject.MaterialSettings.LayerSpacing = layerSpacing;
+            }
+
+            if (double.TryParse(txtToolRadius.Text, out double toolRadius))
+            {
+                _currentProject.MaterialSettings.BendToolRadius = toolRadius;
+            }
+
+            if (double.TryParse(txtKFactor.Text, out double kFactor))
+            {
+                _currentProject.MaterialSettings.KFactor = kFactor;
+            }
+
+            // Redraw all busbars to reflect the new settings
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null && _busbarRenderer != null)
+            {
+                _busbarRenderer.RedrawAllBusbars(activeLayer, _lastActiveBusbar);
+            }
+        }
+        catch (Exception ex)
+        {
+            UpdateStatusBar($"Error updating material settings: {ex.Message}");
+        }
+    }
+
     private void Busbar_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         try

@@ -138,17 +138,81 @@ namespace BusbarCAD.Models
 
         /// <summary>
         /// Calculates the total cut length of the busbar.
-        /// For now, this is a simple sum of all segment lengths.
-        /// Will be improved later to account for bend allowances and trim distances.
+        /// Includes straight sections and bend allowances calculated with K-factor.
         /// </summary>
-        public double CalculateCutLength()
+        /// <param name="toolRadius">Bend tool radius in mm</param>
+        /// <param name="thickness">Busbar thickness in mm</param>
+        /// <param name="kFactor">K-factor for bend allowance calculation (typically 0.9)</param>
+        public double CalculateCutLength(double toolRadius, double thickness, double kFactor)
         {
-            double totalLength = 0;
+            // First, calculate and set trim distances for all segments
+            // Centerline radius for trim calculation
+            double centerlineRadius = toolRadius + (thickness / 2.0);
+
+            for (int i = 0; i < Segments.Count; i++)
+            {
+                // Reset trim distances
+                Segments[i].StartTrimDistance = 0;
+                Segments[i].EndTrimDistance = 0;
+
+                // Calculate trim at start (if there's a bend before this segment)
+                if (i > 0 && i - 1 < Bends.Count)
+                {
+                    double bendAngle = Math.Abs(Bends[i - 1].Angle);
+                    Segments[i].StartTrimDistance = CalculateTrimDistance(centerlineRadius, bendAngle);
+                }
+
+                // Calculate trim at end (if there's a bend after this segment)
+                if (i < Bends.Count)
+                {
+                    double bendAngle = Math.Abs(Bends[i].Angle);
+                    Segments[i].EndTrimDistance = CalculateTrimDistance(centerlineRadius, bendAngle);
+                }
+            }
+
+            // Sum all straight section lengths (segment length minus trim distances)
+            double straightLength = 0;
             foreach (var segment in Segments)
             {
-                totalLength += segment.Length;
+                straightLength += segment.StraightSectionLength;
             }
-            return totalLength;
+
+            // Calculate bend allowance using machine-specific formula: toolRadius + ((thickness/2) * kFactor)
+            double bendAllowanceRadius = toolRadius + ((thickness / 2.0) * kFactor);
+
+            // Sum all bend allowances (arc length at bend allowance radius)
+            double bendAllowanceTotal = 0;
+            foreach (var bend in Bends)
+            {
+                // Convert angle to radians (angle is in degrees)
+                double angleRadians = Math.Abs(bend.Angle) * Math.PI / 180.0;
+
+                // Calculate arc length: angle × radius
+                double arcLength = angleRadians * bendAllowanceRadius;
+
+                // Store the calculated bend allowance for future reference
+                bend.BendAllowance = arcLength;
+
+                bendAllowanceTotal += arcLength;
+            }
+
+            return straightLength + bendAllowanceTotal;
+        }
+
+        /// <summary>
+        /// Calculate the trim distance for a bend based on centerline radius and bend angle
+        /// For 90° bends: trim = centerlineRadius
+        /// For other angles: trim = centerlineRadius × tan(angle/2)
+        /// </summary>
+        private static double CalculateTrimDistance(double centerlineRadius, double bendAngleDegrees)
+        {
+            // Convert to radians
+            double angleRadians = Math.Abs(bendAngleDegrees) * Math.PI / 180.0;
+
+            // Calculate trim: radius × tan(angle/2)
+            double trimDistance = centerlineRadius * Math.Tan(angleRadians / 2.0);
+
+            return trimDistance;
         }
 
         public override string ToString()

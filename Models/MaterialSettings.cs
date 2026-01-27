@@ -13,7 +13,7 @@ namespace BusbarCAD.Models
             BusbarWidth = 80.0; // Default 80mm
             LayerSpacing = 20.0; // Default 20mm
             BendToolRadius = 20.0; // Default 20mm
-            KFactor = 0.45; // Default for aluminum
+            KFactor = 0.9; // Default K-factor for bend allowance calculation
             Thickness = 10.0; // Always 10mm (fixed)
         }
 

@@ -262,7 +262,10 @@ namespace BusbarCAD.Rendering
             if (segmentIndex == 0)
             {
                 // First segment shows cut length and segment length
-                double cutLength = busbar.CalculateCutLength();
+                double cutLength = busbar.CalculateCutLength(
+                    _materialSettings.BendToolRadius,
+                    _materialSettings.Thickness,
+                    _materialSettings.KFactor);
                 text = $"{cutLength:F1} | {length:F1}";
             }
             else if (Math.Abs(bendAngle) != 90)
