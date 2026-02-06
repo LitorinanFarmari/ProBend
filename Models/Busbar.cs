@@ -215,6 +215,27 @@ namespace BusbarCAD.Models
             return trimDistance;
         }
 
+        /// <summary>
+        /// Calculate dimension offset for inside/outside based on bend angle
+        /// Formula: offset = (thickness/2) * tan(bendAngle/2)
+        /// At 90° bend with 10mm thickness: offset = 5mm
+        /// At 1° bend with 10mm thickness: offset = 0.044mm
+        /// </summary>
+        public static double CalculateDimensionOffset(double bendAngleDegrees, double thickness)
+        {
+            double angleRad = Math.Abs(bendAngleDegrees) * Math.PI / 180.0;
+
+            // For very small angles or straight segments, offset is negligible
+            if (angleRad < 0.001) return 0;
+
+            double halfAngle = angleRad / 2.0;
+            double tanHalfAngle = Math.Tan(halfAngle);
+
+            // Calculate offset: for small angles the offset is small, for 90° it's thickness/2
+            return (thickness / 2.0) * tanHalfAngle;
+        }
+
+
         public override string ToString()
         {
             return $"{Name}: {Segments.Count} segments, {Bends.Count} bends, Valid: {IsValid}";

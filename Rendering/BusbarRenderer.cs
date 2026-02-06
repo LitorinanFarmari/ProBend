@@ -26,7 +26,7 @@ namespace BusbarCAD.Rendering
         /// <summary>
         /// Draws a single busbar on the canvas, storing visual references in the busbar object
         /// </summary>
-        public void DrawBusbar(Busbar busbar, bool isHighlighted = false)
+        public void DrawBusbar(Busbar busbar, bool isHighlighted = false, DimensionMode dimensionMode = DimensionMode.Center)
         {
             if (busbar.Segments.Count == 0) return;
 
@@ -94,7 +94,7 @@ namespace BusbarCAD.Rendering
                 }
 
                 // Draw length label for this segment
-                DrawSegmentLengthLabel(busbar, lineStart, lineEnd, i, thickness);
+                DrawSegmentLengthLabel(busbar, lineStart, lineEnd, i, thickness, dimensionMode);
             }
 
             // Draw end marker (blue perpendicular line)
@@ -120,7 +120,7 @@ namespace BusbarCAD.Rendering
         /// <summary>
         /// Redraws all busbars in the layer
         /// </summary>
-        public void RedrawAllBusbars(Layer layer, Busbar? highlightedBusbar = null)
+        public void RedrawAllBusbars(Layer layer, Busbar? highlightedBusbar = null, DimensionMode dimensionMode = DimensionMode.Center)
         {
             // Clear all busbar visuals first
             foreach (var busbar in layer.Busbars)
@@ -132,7 +132,7 @@ namespace BusbarCAD.Rendering
             foreach (var busbar in layer.Busbars)
             {
                 bool isHighlighted = (busbar == highlightedBusbar);
-                DrawBusbar(busbar, isHighlighted);
+                DrawBusbar(busbar, isHighlighted, dimensionMode);
             }
         }
 
@@ -220,11 +220,41 @@ namespace BusbarCAD.Rendering
             return line;
         }
 
-        private void DrawSegmentLengthLabel(Busbar busbar, Point2D start, Point2D end, int segmentIndex, double busbarThickness)
+        private void DrawSegmentLengthLabel(Busbar busbar, Point2D start, Point2D end, int segmentIndex, double busbarThickness, DimensionMode dimensionMode)
         {
             var segment = busbar.Segments[segmentIndex];
-            double length = segment.Length;
             double bendAngle = segment.BendAngle;
+            double centerLength = segment.Length; // Always stores true center dimension
+
+            // Calculate adjustment based on dimension mode
+            // Need to account for bends at BOTH ends of the segment
+            double adjustment = 0;
+            if (dimensionMode != DimensionMode.Center)
+            {
+                double startOffset = 0;
+                double endOffset = 0;
+
+                // Check for bend at the START of this segment (this segment's BendAngle)
+                if (Math.Abs(bendAngle) > 0.001)
+                {
+                    startOffset = Busbar.CalculateDimensionOffset(Math.Abs(bendAngle), _materialSettings.Thickness);
+                }
+
+                // Check for bend at the END of this segment (next segment's BendAngle)
+                if (segmentIndex + 1 < busbar.Segments.Count)
+                {
+                    double nextBendAngle = busbar.Segments[segmentIndex + 1].BendAngle;
+                    if (Math.Abs(nextBendAngle) > 0.001)
+                    {
+                        endOffset = Busbar.CalculateDimensionOffset(Math.Abs(nextBendAngle), _materialSettings.Thickness);
+                    }
+                }
+
+                double totalOffset = startOffset + endOffset;
+                adjustment = (dimensionMode == DimensionMode.Inside) ? totalOffset : -totalOffset;
+            }
+
+            double displayLength = centerLength - adjustment;
 
             // Calculate segment center point
             double centerX = (start.X + end.X) / 2.0;
@@ -266,17 +296,17 @@ namespace BusbarCAD.Rendering
                     _materialSettings.BendToolRadius,
                     _materialSettings.Thickness,
                     _materialSettings.KFactor);
-                text = $"{cutLength:F1} | {length:F1}";
+                text = $"{cutLength:F1} | {displayLength:F1}";
             }
             else if (Math.Abs(bendAngle) != 90)
             {
                 // Other segments show bend angle and length (skip if angle is 90 or -90)
-                text = $"{bendAngle:F1}° / {length:F1}";
+                text = $"{bendAngle:F1}° / {displayLength:F1}";
             }
             else
             {
                 // If angle is 90 or -90, just show length
-                text = $"{length:F1}";
+                text = $"{displayLength:F1}";
             }
 
             // Create text label

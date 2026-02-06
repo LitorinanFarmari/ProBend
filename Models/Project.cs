@@ -12,6 +12,7 @@ namespace BusbarCAD.Models
         public MaterialSettings MaterialSettings { get; set; }
         public List<Layer> Layers { get; set; }
         public string ExportPath { get; set; }
+        public DimensionMode DimensionMode { get; set; }
 
         public Project(string name)
         {
@@ -22,6 +23,7 @@ namespace BusbarCAD.Models
             MaterialSettings = new MaterialSettings();
             Layers = new List<Layer>();
             ExportPath = string.Empty;
+            DimensionMode = DimensionMode.Center; // Default to center dimensions
 
             // Create default layer for MVP
             AddDefaultLayer();
