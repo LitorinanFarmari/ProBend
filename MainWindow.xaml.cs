@@ -2146,7 +2146,8 @@ public partial class MainWindow : Window
             double adjustment = 0;
 
             // If in I/O mode with previous segment, calculate and apply adjustment
-            if (_currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
+            // Skip if hybrid mode (first point was snapped - draw as center)
+            if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2)
             {
                 // Calculate previous segment direction
                 var prevStart = _currentPoints[_currentPoints.Count - 2];
@@ -2417,7 +2418,8 @@ public partial class MainWindow : Window
         double adjustment = 0;
 
         // If in I/O mode with previous segment, calculate and apply adjustment
-        if (_currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
+        // Skip if hybrid mode (first point was snapped - draw as center)
+        if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2)
         {
             // Calculate previous segment direction
             var prevStart = _currentPoints[_currentPoints.Count - 2];
@@ -2769,7 +2771,8 @@ public partial class MainWindow : Window
                                     Point2D anchorPoint = _currentPoints[_currentPoints.Count - 1];
 
                                     // Pre-calculate anchor adjustment for I/O mode to ensure dynamic line is oriented correctly
-                                    if (_currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
+                                    // Skip if hybrid mode (first point was snapped - draw as center)
+                                    if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2)
                                     {
                                         var prevPoint = _currentPoints[_currentPoints.Count - 2];
 
@@ -2931,7 +2934,8 @@ public partial class MainWindow : Window
         }
 
         // Adjust CURRENT endpoint (only if NOT on end reference line)
-        if (isSnappedToReferenceLine && !isSnapToEndRefLine && _currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 1 && _lastActiveBusbar != null)
+        // Skip if hybrid mode (first point was snapped - draw as center)
+        if (isSnappedToReferenceLine && !isSnapToEndRefLine && _currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 1 && _lastActiveBusbar != null)
         {
             // snappedCursor is already at CENTER from reference busbar
             // Find the nearest corner in the reference busbar and use its angle
@@ -2998,8 +3002,8 @@ public partial class MainWindow : Window
         }
 
         // Adjust PREVIOUS corner (always when in I/O mode, even on end reference line)
-        // This ensures the last segment is drawn correctly
-        if (isSnappedToReferenceLine && _currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2 && _lastActiveBusbar != null)
+        // Skip if hybrid mode (first point was snapped - draw as center)
+        if (isSnappedToReferenceLine && _currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2 && _lastActiveBusbar != null)
         {
             // FLIP the adjustment direction for previous corner:
             // Inside mode should move forward, Outside mode should move backward
@@ -3083,7 +3087,7 @@ public partial class MainWindow : Window
             centerCursor = snappedCursor; // Already at center
         }
         // When drawing freely (not snapped), handle I/O mode adjustment
-        else if (_currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2 && !isSnappedToReferenceLine)
+        else if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2 && !isSnappedToReferenceLine)
         {
             // Cursor is at corner position - we need to convert to center for angle calculation
             // First, get preliminary angle from center to corner
