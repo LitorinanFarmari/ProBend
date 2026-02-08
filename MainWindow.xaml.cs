@@ -1772,7 +1772,9 @@ public partial class MainWindow : Window
                 Point2D centerClick = pt;
                 Point2D adjustedLastPoint = lastPoint;
 
-                if (_currentProject.DimensionMode != DimensionMode.Center && previousPoint.HasValue)
+                // IMPORTANT: If previous point was snapped, we're in "center mode" for the rest of drawing
+                // Skip all I/O adjustments - once snapped, draw as center mode
+                if (_currentProject.DimensionMode != DimensionMode.Center && previousPoint.HasValue && !_previousPointWasSnapped)
                 {
                 // Clicked position is corner - convert to center for angle calculation
                 // First, get preliminary angle from center to corner
@@ -2079,6 +2081,9 @@ public partial class MainWindow : Window
                         // Store the I/O display length in the segment for DataGrid
                         // The actual geometry (_currentPoints) stays at center positions
                         _currentSegments[_currentSegments.Count - 1].Length = targetIOLength;
+
+                        // Force DataGrid to refresh and show the updated I/O length immediately
+                        dgSegments.Items.Refresh();
 
                         UpdateStatusBar($"[HYBRID-DISPLAY] RefIO={refIOLength:F1}mm CenterDiff={centerDiff:F1}mm DisplayIO={targetIOLength:F1}mm (geometry is center-based)");
                     }
