@@ -1758,179 +1758,14 @@ public partial class MainWindow : Window
                 // Update hybrid mode condition
                 bothEndsSnapped = _previousPointWasSnapped && _currentPoints.Count >= 1;
 
-                // Store the original center position before any adjustments (for hybrid mode)
-                Point2D originalCenterPt = pt;
+                // SIMPLIFIED I/O MODE WITH REFERENCE:
+                // When snapped to reference in I/O mode, we draw as CENTER mode (no point adjustments)
+                // pt is already at the pure center position from reference busbar
+                // We'll calculate I/O dimension for display only (in hybrid mode calculation below)
+                // This eliminates all the error-prone corner adjustment logic
 
-                // Save this for next iteration (in case next point is also snapped)
-                // This is the ORIGINAL center before any I/O adjustments
-                _lastSnapCenterPosition = originalCenterPt;
-
-                // HYBRID MODE: If both ends are snapped, we'll adjust the segment length
-                // based on the reference segment's I/O dimension + center length difference
-                // This happens AFTER the segment is created, so just store the info for now
-
-                // Skip end reference line - check if clicked point is close to the last segment's end point
-                bool isClickOnEndRefLine = false;
-                if (_lastActiveBusbar != null && _snapReferenceLineEnd != null)
-                {
-                    var lastSegment = _lastActiveBusbar.Segments[_lastActiveBusbar.Segments.Count - 1];
-                    Point2D refBusbarEnd = lastSegment.EndPoint;
-                    double distToEnd = pt.DistanceTo(refBusbarEnd);
-                    // If within 60mm of the end point (±50mm range + 10mm tolerance), it's on the end reference line
-                    if (distToEnd <= 60.0)
-                    {
-                        isClickOnEndRefLine = true;
-                    }
-                }
-
-                // pt is already at CENTER from reference busbar
-                // In I/O mode, adjust the CURRENT click position (endpoint) forward/backward based on reference busbar's nearest corner angle
-                // Skip adjustment if clicking on end reference line (like we do for start reference line)
-                if (!isClickOnEndRefLine && _currentProject.DimensionMode != DimensionMode.Center && _lastActiveBusbar != null)
-                {
-                    // Find the nearest corner in the reference busbar
-                    double nearestCornerAngle = 90.0; // Default to 90° if no corner found
-                    int closestCornerIndex = -1; // Declare outside to use later
-
-                    if (usedDynamicSnap && _dynamicSnapCornerBendAngle > 0.01)
-                    {
-                        // When using dynamic snap, we already have the corner angle stored
-                        nearestCornerAngle = _dynamicSnapCornerBendAngle;
-                    }
-                    else
-                    {
-                        // Find nearest corner to pt in _lastActiveBusbar
-                        double closestDist = double.MaxValue;
-
-                        for (int i = 0; i < _lastActiveBusbar.Segments.Count - 1; i++)
-                        {
-                            Point2D cornerPoint = _lastActiveBusbar.Segments[i].EndPoint;
-                            double dist = pt.DistanceTo(cornerPoint);
-
-                            if (dist < closestDist)
-                            {
-                                closestDist = dist;
-                                closestCornerIndex = i;
-                            }
-                        }
-
-                        // Get the bend angle at this corner (stored in the next segment's BendAngle)
-                        if (closestCornerIndex >= 0 && closestCornerIndex + 1 < _lastActiveBusbar.Segments.Count)
-                        {
-                            nearestCornerAngle = Math.Abs(_lastActiveBusbar.Segments[closestCornerIndex + 1].BendAngle);
-                        }
-                    }
-
-                    // Apply adjustment to all corners except the first (we can't know which is "last" until user finishes drawing)
-                    // Calculate how much to move the CURRENT click position (endpoint) based on reference busbar's corner angle
-                    double offset = Busbar.CalculateDimensionOffset(nearestCornerAngle, _currentProject.MaterialSettings.Thickness);
-                    // REVERSED: Inside moves backward, Outside moves forward
-                    double adjustmentSign = (_currentProject.DimensionMode == DimensionMode.Inside) ? -1.0 : 1.0;
-
-                    // Calculate current segment direction (from last placed point to pt)
-                    double segDx = pt.X - lastPoint.X;
-                    double segDy = pt.Y - lastPoint.Y;
-
-                    // Move the click position forward/backward along current segment direction
-                    double segLength = Math.Sqrt(segDx * segDx + segDy * segDy);
-                    if (segLength > 0.1)
-                    {
-                        double segUnitX = segDx / segLength;
-                        double segUnitY = segDy / segLength;
-
-                        pt = new Point2D(
-                            pt.X + adjustmentSign * offset * segUnitX,
-                            pt.Y + adjustmentSign * offset * segUnitY
-                        );
-
-                        // Debug: Show adjustment info
-                        UpdateStatusBar($"[REF-I/O-CLICK] Angle={nearestCornerAngle:F1}° Offset={offset:F1}mm Mode={_currentProject.DimensionMode} Endpoint=({pt.X:F1},{pt.Y:F1})");
-                    }
-                }
-
-                // Adjust PREVIOUS corner (always when in I/O mode, even on end reference line)
-                // This ensures the last segment is drawn correctly
-                if (_currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2 && _lastActiveBusbar != null)
-                {
-                    // Find the previous corner's angle from the reference busbar
-                    var prevPoint = _currentPoints[_currentPoints.Count - 2];
-
-                    // Find nearest corner to lastPoint in reference busbar
-                    double prevCornerAngle = 90.0;
-                    double closestPrevDist = double.MaxValue;
-                    int closestPrevCornerIndex = -1;
-
-                    for (int i = 0; i < _lastActiveBusbar.Segments.Count - 1; i++)
-                    {
-                        Point2D cornerPoint = _lastActiveBusbar.Segments[i].EndPoint;
-                        double dist = lastPoint.DistanceTo(cornerPoint);
-
-                        if (dist < closestPrevDist)
-                        {
-                            closestPrevDist = dist;
-                            closestPrevCornerIndex = i;
-                        }
-                    }
-
-                    // Calculate the bend angle directly from segment directions for precision
-                    if (closestPrevCornerIndex >= 0 && closestPrevCornerIndex + 1 < _lastActiveBusbar.Segments.Count)
-                    {
-                        var seg1 = _lastActiveBusbar.Segments[closestPrevCornerIndex];
-                        var seg2 = _lastActiveBusbar.Segments[closestPrevCornerIndex + 1];
-
-                        // Calculate angles from segment directions (more precise than stored BendAngle)
-                        double angle1Rad = seg1.AngleRadians;
-                        double angle2Rad = seg2.AngleRadians;
-
-                        double prevAngleDiff = angle2Rad - angle1Rad;
-
-                        // Normalize to -180 to +180 range
-                        while (prevAngleDiff > Math.PI) prevAngleDiff -= 2 * Math.PI;
-                        while (prevAngleDiff < -Math.PI) prevAngleDiff += 2 * Math.PI;
-
-                        prevCornerAngle = Math.Abs(prevAngleDiff * 180.0 / Math.PI);
-
-                        // Hard limit at 90 degrees (maximum angle)
-                        // Any angle >= 90 due to floating point errors gets clamped to exactly 90
-                        if (prevCornerAngle >= 90.0)
-                        {
-                            prevCornerAngle = 90.0;
-                        }
-                    }
-
-                    // Calculate adjustment for the previous corner
-                    double prevOffset = Busbar.CalculateDimensionOffset(prevCornerAngle, _currentProject.MaterialSettings.Thickness);
-
-                    // FLIP the adjustment direction for previous corner:
-                    // Inside mode should move forward, Outside mode should move backward
-                    double prevAdjustmentSign = (_currentProject.DimensionMode == DimensionMode.Inside) ? 1.0 : -1.0;
-
-                    // Calculate previous segment direction
-                    double prevSegDx = lastPoint.X - prevPoint.X;
-                    double prevSegDy = lastPoint.Y - prevPoint.Y;
-                    double prevSegLength = Math.Sqrt(prevSegDx * prevSegDx + prevSegDy * prevSegDy);
-
-                    if (prevSegLength > 0.1)
-                    {
-                        double prevUnitX = prevSegDx / prevSegLength;
-                        double prevUnitY = prevSegDy / prevSegLength;
-
-                        Point2D adjustedLastPoint = new Point2D(
-                            lastPoint.X + prevAdjustmentSign * prevOffset * prevUnitX,
-                            lastPoint.Y + prevAdjustmentSign * prevOffset * prevUnitY
-                        );
-
-                        // Update the last point in the list
-                        _currentPoints[_currentPoints.Count - 1] = adjustedLastPoint;
-
-                        // Update the previous segment's length in _currentSegments
-                        if (_currentSegments.Count > 0)
-                        {
-                            double newLength = prevPoint.DistanceTo(adjustedLastPoint);
-                            _currentSegments[_currentSegments.Count - 1].Length = newLength;
-                        }
-                    }
-                }
+                // Just use the point as-is (pure center position)
+                // No adjustments needed - geometry is center-based when snapped to reference
             }
             else // Free drawing (not snapped to reference line)
             {
@@ -2154,8 +1989,8 @@ public partial class MainWindow : Window
             // Automatically save or update the busbar after each segment
             SaveOrUpdateCurrentBusbar();
 
-            // HYBRID MODE: If both ends were snapped, adjust segment length based on reference
-            // Use reference segment's I/O length + center length difference
+            // HYBRID MODE: If both ends were snapped, calculate I/O dimension for DISPLAY ONLY
+            // Geometry remains center-based (no point adjustments), we just show I/O length in DataGrid
             if (bothEndsSnapped && isSnappedToReferenceLine && _currentProject.DimensionMode != DimensionMode.Center && _lastActiveBusbar != null && _currentPoints.Count >= 2)
             {
                 // Find which reference segment we're matching (closest to the last two snapped points)
@@ -2182,7 +2017,7 @@ public partial class MainWindow : Window
                 {
                     var refSegment = _lastActiveBusbar.Segments[closestRefSegmentIndex];
 
-                    // Calculate current segment's center length (from stored points)
+                    // Calculate current segment's center length (geometry is center-based)
                     double currentCenterLength = startPt.DistanceTo(endPt);
 
                     // Get reference segment's center length
@@ -2237,47 +2072,15 @@ public partial class MainWindow : Window
                     // Current segment's end bend - we don't know yet, use reference segment's end bend
                     currentEndOffset = refEndOffset;
 
-                    double currentTotalOffset = currentStartOffset + currentEndOffset;
-                    double currentAdjustment = (_currentProject.DimensionMode == DimensionMode.Inside) ? currentTotalOffset : -currentTotalOffset;
-                    double targetCenterLength = targetIOLength + currentAdjustment;
-
-                    // Adjust the endpoint to match target center length
-                    double dx = endPt.X - startPt.X;
-                    double dy = endPt.Y - startPt.Y;
-                    double currentLength = Math.Sqrt(dx * dx + dy * dy);
-
-                    if (currentLength > 0.1)
+                    // DISPLAY ONLY: Update the DataGrid to show the calculated I/O length
+                    // Geometry remains center-based (no point adjustments)
+                    if (_currentSegments.Count > 0)
                     {
-                        double unitX = dx / currentLength;
-                        double unitY = dy / currentLength;
+                        // Store the I/O display length in the segment for DataGrid
+                        // The actual geometry (_currentPoints) stays at center positions
+                        _currentSegments[_currentSegments.Count - 1].Length = targetIOLength;
 
-                        Point2D adjustedEndpoint = new Point2D(
-                            startPt.X + targetCenterLength * unitX,
-                            startPt.Y + targetCenterLength * unitY
-                        );
-
-                        _currentPoints[_currentPoints.Count - 1] = adjustedEndpoint;
-
-                        // Update the segment length
-                        _currentSegments[_currentSegments.Count - 1].Length = targetCenterLength;
-
-                        // Update the visual position of the last blue point
-                        for (int i = _currentShapes.Count - 1; i >= 0; i--)
-                        {
-                            if (_currentShapes[i] is Ellipse ellipse &&
-                                ellipse.Fill == Brushes.Blue &&
-                                ellipse.Width == 2)
-                            {
-                                Canvas.SetLeft(ellipse, adjustedEndpoint.X - 1);
-                                Canvas.SetTop(ellipse, adjustedEndpoint.Y - 1);
-                                break;
-                            }
-                        }
-
-                        // Redraw to show the adjusted segment
-                        RedrawCenterlines();
-
-                        UpdateStatusBar($"[HYBRID] Ref={refIOLength:F1}mm CenterDiff={centerDiff:F1}mm Target={targetIOLength:F1}mm CenterTarget={targetCenterLength:F1}mm");
+                        UpdateStatusBar($"[HYBRID-DISPLAY] RefIO={refIOLength:F1}mm CenterDiff={centerDiff:F1}mm DisplayIO={targetIOLength:F1}mm (geometry is center-based)");
                     }
                 }
             }
