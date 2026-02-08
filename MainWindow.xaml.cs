@@ -5440,22 +5440,35 @@ public partial class MainWindow : Window
                 return;
             }
 
-            // Convert from display dimension to center dimension if needed
+            // Convert from display dimension (I/O) to center dimension
+            // I/O dimension accounts for bends at BOTH ends of the segment
+            // Inside = Center - startOffset - endOffset
+            // So: Center = Inside + startOffset + endOffset
             double centerLength = newValue;
             if (_currentProject.DimensionMode != DimensionMode.Center)
             {
                 double thickness = _currentProject.MaterialSettings.Thickness;
-                double bendAngle = editedSegment.BendAngle;
+                double totalOffset = 0;
 
-                // Calculate adjustment
-                double adjustment = 0;
-                if (Math.Abs(bendAngle) > 0.001)
+                // Start bend offset (this segment's BendAngle)
+                double startBendAngle = editedSegment.BendAngle;
+                if (Math.Abs(startBendAngle) > 0.001)
                 {
-                    double offset = Busbar.CalculateDimensionOffset(Math.Abs(bendAngle), thickness);
-                    adjustment = (_currentProject.DimensionMode == DimensionMode.Inside) ? offset : -offset;
+                    totalOffset += Busbar.CalculateDimensionOffset(Math.Abs(startBendAngle), thickness);
                 }
 
-                centerLength = newValue + adjustment; // Add back the adjustment
+                // End bend offset (next segment's BendAngle, if exists)
+                if (segmentIndex + 1 < busbar.Segments.Count)
+                {
+                    double endBendAngle = busbar.Segments[segmentIndex + 1].BendAngle;
+                    if (Math.Abs(endBendAngle) > 0.001)
+                    {
+                        totalOffset += Busbar.CalculateDimensionOffset(Math.Abs(endBendAngle), thickness);
+                    }
+                }
+
+                double adjustment = (_currentProject.DimensionMode == DimensionMode.Inside) ? totalOffset : -totalOffset;
+                centerLength = newValue + adjustment;
             }
 
             // Apply minimum length constraint to center dimension
@@ -5469,16 +5482,20 @@ public partial class MainWindow : Window
                 if (_currentProject.DimensionMode != DimensionMode.Center)
                 {
                     double thickness = _currentProject.MaterialSettings.Thickness;
-                    double bendAngle = editedSegment.BendAngle;
+                    double dispTotalOffset = 0;
 
-                    double adjustment = 0;
-                    if (Math.Abs(bendAngle) > 0.001)
+                    double startBend = editedSegment.BendAngle;
+                    if (Math.Abs(startBend) > 0.001)
+                        dispTotalOffset += Busbar.CalculateDimensionOffset(Math.Abs(startBend), thickness);
+                    if (segmentIndex + 1 < busbar.Segments.Count)
                     {
-                        double offset = Busbar.CalculateDimensionOffset(Math.Abs(bendAngle), thickness);
-                        adjustment = (_currentProject.DimensionMode == DimensionMode.Inside) ? offset : -offset;
+                        double endBend = busbar.Segments[segmentIndex + 1].BendAngle;
+                        if (Math.Abs(endBend) > 0.001)
+                            dispTotalOffset += Busbar.CalculateDimensionOffset(Math.Abs(endBend), thickness);
                     }
 
-                    displayLength = centerLength - adjustment;
+                    double dispAdj = (_currentProject.DimensionMode == DimensionMode.Inside) ? dispTotalOffset : -dispTotalOffset;
+                    displayLength = centerLength - dispAdj;
                 }
 
                 textBox.Text = displayLength.ToString("F1");
