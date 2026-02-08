@@ -2082,8 +2082,8 @@ public partial class MainWindow : Window
                         // The actual geometry (_currentPoints) stays at center positions
                         _currentSegments[_currentSegments.Count - 1].Length = targetIOLength;
 
-                        // Force DataGrid to refresh and show the updated I/O length immediately
-                        dgSegments.Items.Refresh();
+                        // Rebuild DataGrid display list with updated I/O length
+                        UpdateSegmentList();
 
                         UpdateStatusBar($"[HYBRID-DISPLAY] RefIO={refIOLength:F1}mm CenterDiff={centerDiff:F1}mm DisplayIO={targetIOLength:F1}mm (geometry is center-based)");
                     }
