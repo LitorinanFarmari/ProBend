@@ -2092,7 +2092,9 @@ public partial class MainWindow : Window
         }
 
         // Update the snap tracking flag for next iteration (hybrid mode)
-        _previousPointWasSnapped = isSnappedToReferenceLine;
+        // Once snapped to any reference point, stay in center mode for the rest of drawing
+        if (isSnappedToReferenceLine)
+            _previousPointWasSnapped = true;
 
         UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
     }
