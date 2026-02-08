@@ -3314,8 +3314,54 @@ public partial class MainWindow : Window
 
         // Update measurements in DataGrid (no visual preview)
         // Use adjustedLastPoint for correct angle calculation after snap
-        // Pass displayAdjustment for I/O dimension calculation
-        UpdateLivePreviewMeasurements(adjustedLastPoint, endPoint, null, displayAdjustment);
+        // In hybrid mode (first point snapped + I/O mode), calculate I/O dimension for preview
+        double? hybridIOLength = null;
+        if (_previousPointWasSnapped && isSnappedToReferenceLine && _currentProject.DimensionMode != DimensionMode.Center && _lastActiveBusbar != null && _currentPoints.Count >= 1)
+        {
+            // Find matching reference segment (same logic as click handler)
+            var previewStart = adjustedLastPoint;
+            var previewEnd = endPoint;
+            int closestRefIdx = -1;
+            double closestAvgDist = double.MaxValue;
+
+            for (int i = 0; i < _lastActiveBusbar.Segments.Count; i++)
+            {
+                Point2D refStart = _lastActiveBusbar.Segments[i].StartPoint;
+                Point2D refEnd = _lastActiveBusbar.Segments[i].EndPoint;
+                double avgDist = (previewStart.DistanceTo(refStart) + previewEnd.DistanceTo(refEnd)) / 2.0;
+                if (avgDist < closestAvgDist)
+                {
+                    closestAvgDist = avgDist;
+                    closestRefIdx = i;
+                }
+            }
+
+            if (closestRefIdx >= 0)
+            {
+                var refSeg = _lastActiveBusbar.Segments[closestRefIdx];
+                double currentCenterLen = previewStart.DistanceTo(previewEnd);
+                double refCenterLen = refSeg.Length;
+                double centerDiff = currentCenterLen - refCenterLen;
+
+                // Calculate reference segment's I/O length
+                double refStartOff = 0, refEndOff = 0;
+                if (Math.Abs(refSeg.BendAngle) > 0.001)
+                    refStartOff = Busbar.CalculateDimensionOffset(Math.Abs(refSeg.BendAngle), _currentProject.MaterialSettings.Thickness);
+                if (closestRefIdx + 1 < _lastActiveBusbar.Segments.Count)
+                {
+                    double nextBend = _lastActiveBusbar.Segments[closestRefIdx + 1].BendAngle;
+                    if (Math.Abs(nextBend) > 0.001)
+                        refEndOff = Busbar.CalculateDimensionOffset(Math.Abs(nextBend), _currentProject.MaterialSettings.Thickness);
+                }
+                double refTotalOff = refStartOff + refEndOff;
+                double refAdj = (_currentProject.DimensionMode == DimensionMode.Inside) ? refTotalOff : -refTotalOff;
+                double refIOLen = refCenterLen - refAdj;
+
+                hybridIOLength = refIOLen + centerDiff;
+            }
+        }
+
+        UpdateLivePreviewMeasurements(adjustedLastPoint, endPoint, hybridIOLength, displayAdjustment);
 
         // After first point is placed, start/restart timer to detect when mouse stops
         if (_currentPoints.Count >= 1)
