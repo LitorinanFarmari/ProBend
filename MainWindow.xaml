@@ -52,6 +52,12 @@
                     <TextBlock Text="Move"/>
                 </StackPanel>
             </Button>
+            <Button Name="btnStartPoints" Click="StartPoints_Click" ToolTip="Place Start Points (S)">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="◉" FontSize="16" Margin="0,0,5,0" Foreground="Green"/>
+                    <TextBlock Text="Start Pts"/>
+                </StackPanel>
+            </Button>
             <Separator/>
             <Button Name="btnZoomIn" Click="ZoomIn_Click" ToolTip="Zoom In (+)">
                 <StackPanel Orientation="Horizontal">
@@ -151,65 +157,70 @@
 
             <!-- Canvas Area -->
             <Border Grid.Column="1" Background="White" ClipToBounds="True">
-                <Canvas Name="drawingCanvas"
-                        Background="White"
-                        ClipToBounds="True"
-                        Focusable="True"
-                        MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
-                        MouseMove="Canvas_MouseMove"
-                        MouseRightButtonDown="Canvas_MouseRightButtonDown"
-                        SizeChanged="DrawingCanvas_SizeChanged">
-                    <!-- Grid background (optional) -->
+                <Grid Name="canvasContainer"
+                      Background="Transparent"
+                      Focusable="True"
+                      FocusVisualStyle="{x:Null}"
+                      MouseLeftButtonDown="Canvas_MouseLeftButtonDown"
+                      MouseMove="Canvas_MouseMove"
+                      MouseRightButtonDown="Canvas_MouseRightButtonDown"
+                      SizeChanged="DrawingCanvas_SizeChanged">
+                    <Canvas Name="drawingCanvas"
+                            Background="Transparent">
+                        <!-- Grid background (optional) -->
 
-                    <!-- Instruction overlay when no busbars -->
-                    <TextBlock Name="txtInstructions"
-                               Text="Click 'Draw' button or press 'D' to start drawing a busbar.&#x0a;Click points to create segments. Right-click or press ESC to finish."
-                               Canvas.Left="0"
-                               Canvas.Top="0"
-                               FontSize="16"
-                               Foreground="#999999"
-                               TextAlignment="Center"
-                               IsHitTestVisible="False"/>
+                        <!-- Instruction overlay when no busbars -->
+                        <TextBlock Name="txtInstructions"
+                                   Text="Click 'Draw' button or press 'D' to start drawing a busbar.&#x0a;Click points to create segments. Right-click or press ESC to finish."
+                                   Canvas.Left="0"
+                                   Canvas.Top="0"
+                                   FontSize="16"
+                                   Foreground="#999999"
+                                   TextAlignment="Center"
+                                   IsHitTestVisible="False"/>
+                    </Canvas>
 
-                    <!-- Move Points Controls (Hidden by default) -->
-                    <Grid Name="moveControlsGrid" Visibility="Collapsed" Canvas.Left="20" Canvas.Top="20" Width="84" Height="90">
-                        <!-- Drag Handle -->
-                        <Border Name="moveDragHandle" Width="84" Height="12" VerticalAlignment="Top" Background="#E0E0E0"
-                                BorderBrush="#AAAAAA" BorderThickness="1" CornerRadius="2"
-                                MouseLeftButtonDown="MoveDragHandle_MouseDown" MouseMove="MoveDragHandle_MouseMove" MouseLeftButtonUp="MoveDragHandle_MouseUp"
-                                Cursor="SizeAll">
-                            <TextBlock Text="⋮⋮⋮" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="8" Foreground="#666666"/>
-                        </Border>
+                    <!-- Move Points Controls overlay - positioned relative to viewport, not canvas -->
+                    <Canvas Name="overlayCanvas">
+                        <Grid Name="moveControlsGrid" Visibility="Collapsed" Canvas.Left="20" Canvas.Top="20" Width="84" Height="90">
+                            <!-- Drag Handle -->
+                            <Border Name="moveDragHandle" Width="84" Height="12" VerticalAlignment="Top" Background="#E0E0E0"
+                                    BorderBrush="#AAAAAA" BorderThickness="1" CornerRadius="2"
+                                    MouseLeftButtonDown="MoveDragHandle_MouseDown" MouseMove="MoveDragHandle_MouseMove" MouseLeftButtonUp="MoveDragHandle_MouseUp"
+                                    Cursor="SizeAll">
+                                <TextBlock Text="⋮⋮⋮" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="8" Foreground="#666666"/>
+                            </Border>
 
-                        <!-- Arrow Controls (shifted down to make room for drag handle) -->
-                        <Grid Margin="0,12,0,0">
-                            <!-- Up Arrow -->
-                            <Button Name="btnMoveUp" Width="28" Height="21" HorizontalAlignment="Center" VerticalAlignment="Top" Click="MoveDirection_Click" Tag="Up" Background="LightGray">
-                                <TextBlock Text="↑" FontSize="14" FontWeight="Bold"/>
-                            </Button>
+                            <!-- Arrow Controls (shifted down to make room for drag handle) -->
+                            <Grid Margin="0,12,0,0">
+                                <!-- Up Arrow -->
+                                <Button Name="btnMoveUp" Width="28" Height="21" HorizontalAlignment="Center" VerticalAlignment="Top" Click="MoveDirection_Click" Tag="Up" Background="LightGray">
+                                    <TextBlock Text="↑" FontSize="14" FontWeight="Bold"/>
+                                </Button>
 
-                            <!-- Down Arrow -->
-                            <Button Name="btnMoveDown" Width="28" Height="21" HorizontalAlignment="Center" VerticalAlignment="Bottom" Click="MoveDirection_Click" Tag="Down" Background="LightGray">
-                                <TextBlock Text="↓" FontSize="14" FontWeight="Bold"/>
-                            </Button>
+                                <!-- Down Arrow -->
+                                <Button Name="btnMoveDown" Width="28" Height="21" HorizontalAlignment="Center" VerticalAlignment="Bottom" Click="MoveDirection_Click" Tag="Down" Background="LightGray">
+                                    <TextBlock Text="↓" FontSize="14" FontWeight="Bold"/>
+                                </Button>
 
-                            <!-- Left Arrow -->
-                            <Button Name="btnMoveLeft" Width="21" Height="28" HorizontalAlignment="Left" VerticalAlignment="Center" Click="MoveDirection_Click" Tag="Left" Background="LightGray">
-                                <TextBlock Text="←" FontSize="14" FontWeight="Bold"/>
-                            </Button>
+                                <!-- Left Arrow -->
+                                <Button Name="btnMoveLeft" Width="21" Height="28" HorizontalAlignment="Left" VerticalAlignment="Center" Click="MoveDirection_Click" Tag="Left" Background="LightGray">
+                                    <TextBlock Text="←" FontSize="14" FontWeight="Bold"/>
+                                </Button>
 
-                            <!-- Right Arrow -->
-                            <Button Name="btnMoveRight" Width="21" Height="28" HorizontalAlignment="Right" VerticalAlignment="Center" Click="MoveDirection_Click" Tag="Right" Background="LightGray">
-                                <TextBlock Text="→" FontSize="14" FontWeight="Bold"/>
-                            </Button>
+                                <!-- Right Arrow -->
+                                <Button Name="btnMoveRight" Width="21" Height="28" HorizontalAlignment="Right" VerticalAlignment="Center" Click="MoveDirection_Click" Tag="Right" Background="LightGray">
+                                    <TextBlock Text="→" FontSize="14" FontWeight="Bold"/>
+                                </Button>
 
-                            <!-- Center Dimension Input -->
-                            <TextBox Name="txtMoveDimension" Width="35" Height="21" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                     TextAlignment="Center" FontSize="10" Background="White"
-                                     PreviewKeyDown="MoveDimension_KeyDown" TextChanged="MoveDimension_TextChanged"/>
+                                <!-- Center Dimension Input -->
+                                <TextBox Name="txtMoveDimension" Width="35" Height="21" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                         TextAlignment="Center" FontSize="10" Background="White"
+                                         PreviewKeyDown="MoveDimension_KeyDown" TextChanged="MoveDimension_TextChanged"/>
+                            </Grid>
                         </Grid>
-                    </Grid>
-                </Canvas>
+                    </Canvas>
+                </Grid>
             </Border>
 
             <!-- Segment List Panel -->

@@ -9,6 +9,7 @@ namespace BusbarCAD.Models
         public string Color { get; set; }
         public bool Visible { get; set; }
         public List<Busbar> Busbars { get; set; }
+        public List<StartPoint> StartPoints { get; set; }
 
         public Layer(string name, double zPosition)
         {
@@ -17,6 +18,7 @@ namespace BusbarCAD.Models
             Color = "#333333"; // Default dark gray
             Visible = true;
             Busbars = new List<Busbar>();
+            StartPoints = new List<StartPoint>();
         }
 
         public void AddBusbar(Busbar busbar)

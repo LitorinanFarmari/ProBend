@@ -95,6 +95,7 @@ public partial class MainWindow : Window
     private Point2D? _dynamicSnapDisabledForPoint = null; // Track which snap point disabled the dynamic line
 
     // Snapping control
+    private bool _hvSnapEnabled = true; // Horizontal/Vertical snap toggle (can be disabled in future)
     private bool _isSnappingDisabled = false; // Universal snapping disable flag (for button and auto-disable after click)
     private int _lastVisibleReferenceLineIndex = -1; // Track which reference line is currently visible (-1=start, -2=end, 0+=corner index)
     private Busbar? _lastActiveBusbar = null; // Track the last active busbar for snap line reference
@@ -107,6 +108,7 @@ public partial class MainWindow : Window
 
     // Rendering
     private BusbarRenderer? _busbarRenderer = null;
+    private bool _initialViewSet = false; // Track if initial view centering has been done with real canvas size
 
     // Move Points Mode
     private bool _isMovePointsMode = false;
@@ -124,6 +126,19 @@ public partial class MainWindow : Window
     private List<Ellipse> _allPointMarkers = new List<Ellipse>();
     private bool _isDraggingMoveControls = false;
     private System.Windows.Point _dragStartPoint;
+
+    // Start Point Mode
+    private bool _isStartPointMode = false;
+    private Point2D? _startPointAnchor = null;
+    private bool _startPointAnchorIsBusbarPoint = false;
+    private List<Ellipse> _startPointMarkers = new List<Ellipse>();
+    private Line? _startPointPreviewLine = null;
+    private Ellipse? _startPointPreviewDot = null;
+    private TextBlock? _startPointDistanceLabel = null;
+    private List<StartPoint> _selectedStartPoints = new List<StartPoint>();
+    private string _startPointTypedDistance = "";  // Buffer for typed distance digits
+    private double _startPointLastAngle = 0;       // Last preview angle for confirming typed distance
+    private Dictionary<StartPoint, Point2D> _originalStartPointPositions = new Dictionary<StartPoint, Point2D>();
 
     public enum MoveDirection
     {
@@ -159,10 +174,10 @@ public partial class MainWindow : Window
         _canvasTransform.Children.Add(_translateTransform);
         drawingCanvas.RenderTransform = _canvasTransform;
 
-        // Add mouse wheel zoom handler
-        drawingCanvas.MouseWheel += Canvas_MouseWheel;
-        drawingCanvas.MouseDown += Canvas_MouseDown;
-        drawingCanvas.MouseUp += Canvas_MouseUp;
+        // Add mouse wheel zoom handler (on container, not canvas, for full viewport coverage)
+        canvasContainer.MouseWheel += Canvas_MouseWheel;
+        canvasContainer.MouseDown += Canvas_MouseDown;
+        canvasContainer.MouseUp += Canvas_MouseUp;
 
         // Set initial scale to show ~200mm visible
         SetInitialScale();
@@ -170,27 +185,38 @@ public partial class MainWindow : Window
 
     private void DrawingCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        // Center the instruction text when canvas size changes
-        if (txtInstructions != null && drawingCanvas.ActualWidth > 0 && drawingCanvas.ActualHeight > 0)
+        // On first resize, recalculate scale and centering with actual container dimensions
+        if (!_initialViewSet && canvasContainer.ActualWidth > 0 && canvasContainer.ActualHeight > 0)
         {
-            Canvas.SetLeft(txtInstructions, (drawingCanvas.ActualWidth - txtInstructions.ActualWidth) / 2);
-            Canvas.SetTop(txtInstructions, (drawingCanvas.ActualHeight - txtInstructions.ActualHeight) / 2);
+            _initialViewSet = true;
+            SetInitialScale();
+        }
+
+        // Center the instruction text at the viewport center (in canvas-local coordinates)
+        if (txtInstructions != null && canvasContainer.ActualWidth > 0 && canvasContainer.ActualHeight > 0)
+        {
+            double viewportCenterX = (canvasContainer.ActualWidth / 2 - _translateTransform.X) / _scaleTransform.ScaleX;
+            double viewportCenterY = (canvasContainer.ActualHeight / 2 - _translateTransform.Y) / _scaleTransform.ScaleY;
+            Canvas.SetLeft(txtInstructions, viewportCenterX - txtInstructions.ActualWidth / 2);
+            Canvas.SetTop(txtInstructions, viewportCenterY - txtInstructions.ActualHeight / 2);
         }
     }
 
     private void SetInitialScale()
     {
-        // Calculate scale so that 200mm fits comfortably in the canvas width
-        double targetVisibleMm = 200.0;
-        double canvasWidth = drawingCanvas.ActualWidth > 0 ? drawingCanvas.ActualWidth : 800; // Fallback width
-        double initialScale = (canvasWidth * 0.8) / targetVisibleMm; // 80% of canvas width
+        // Calculate scale so that 450mm fits vertically in the viewport
+        double targetVisibleMm = 450.0;
+        double viewportWidth = canvasContainer.ActualWidth > 0 ? canvasContainer.ActualWidth : 800; // Fallback width
+        double viewportHeight = canvasContainer.ActualHeight > 0 ? canvasContainer.ActualHeight : 600; // Fallback height
+        double initialScale = viewportHeight / targetVisibleMm;
 
         _scaleTransform.ScaleX = initialScale;
         _scaleTransform.ScaleY = initialScale;
 
-        // Start with no translation - user can pan as needed
-        _translateTransform.X = 0;
-        _translateTransform.Y = 0;
+        // Center the view so canvas origin (0,0) is near the middle of the viewport
+        // This gives room to draw in all directions from the start
+        _translateTransform.X = viewportWidth / 2;
+        _translateTransform.Y = viewportHeight / 2;
     }
 
     private void InitializeProject()
@@ -480,6 +506,24 @@ public partial class MainWindow : Window
                 _allPointMarkers.Add(marker);
             }
         }
+
+        // Draw start point markers (green circles)
+        foreach (var sp in currentLayer.StartPoints)
+        {
+            var marker = new Ellipse
+            {
+                Width = 6,
+                Height = 6,
+                Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0)),
+                StrokeThickness = 1.5,
+                Fill = System.Windows.Media.Brushes.Transparent
+            };
+
+            Canvas.SetLeft(marker, sp.Position.X - 3);
+            Canvas.SetTop(marker, sp.Position.Y - 3);
+            drawingCanvas.Children.Add(marker);
+            _allPointMarkers.Add(marker);
+        }
     }
 
     private void HideAllBusbarPoints()
@@ -494,6 +538,7 @@ public partial class MainWindow : Window
     private void ClearPointSelection()
     {
         _selectedPoints.Clear();
+        _selectedStartPoints.Clear();
 
         // Remove all visual markers
         foreach (var marker in _selectedPointMarkers)
@@ -604,7 +649,7 @@ public partial class MainWindow : Window
 
     private void PreviewMove()
     {
-        if (_selectedPoints.Count == 0 || _currentMoveDirection == MoveDirection.None)
+        if ((_selectedPoints.Count == 0 && _selectedStartPoints.Count == 0) || _currentMoveDirection == MoveDirection.None)
             return;
 
         // Restore all previously moved points to original positions before applying new preview
@@ -613,6 +658,10 @@ public partial class MainWindow : Window
             foreach (var (key, originalPos) in _originalPointPositions.ToList())
             {
                 SetBusbarPointDirect(key.Item1, key.Item2, originalPos);
+            }
+            foreach (var (sp, originalPos) in _originalStartPointPositions.ToList())
+            {
+                sp.Position = originalPos;
             }
         }
 
@@ -636,6 +685,22 @@ public partial class MainWindow : Window
             _originalPointPositions.Remove(key);
         }
 
+        // Track original start point positions
+        foreach (var sp in _selectedStartPoints)
+        {
+            if (!_originalStartPointPositions.ContainsKey(sp))
+            {
+                _originalStartPointPositions[sp] = new Point2D(sp.Position.X, sp.Position.Y);
+            }
+        }
+        var startPointsToRemove = _originalStartPointPositions.Keys
+            .Where(sp => !_selectedStartPoints.Contains(sp))
+            .ToList();
+        foreach (var sp in startPointsToRemove)
+        {
+            _originalStartPointPositions.Remove(sp);
+        }
+
         _hasPreviewMove = true;
 
         // Calculate offset based on direction and dimension
@@ -654,6 +719,13 @@ public partial class MainWindow : Window
             var originalPoint = _originalPointPositions[(busbar, pointIndex)];
             var newPoint = new Point2D(originalPoint.X + offset.X, originalPoint.Y + offset.Y);
             SetBusbarPointDirect(busbar, pointIndex, newPoint);
+        }
+
+        // Move selected start points
+        foreach (var sp in _selectedStartPoints)
+        {
+            var originalPos = _originalStartPointPositions[sp];
+            sp.Position = new Point2D(originalPos.X + offset.X, originalPos.Y + offset.Y);
         }
 
         // Recalculate bend angles for all affected busbars during preview
@@ -709,11 +781,11 @@ public partial class MainWindow : Window
 
     private void ApplyMove()
     {
-        if (_selectedPoints.Count == 0 || _currentMoveDirection == MoveDirection.None)
+        if ((_selectedPoints.Count == 0 && _selectedStartPoints.Count == 0) || _currentMoveDirection == MoveDirection.None)
             return;
 
         // Move is already applied by PreviewMove, just clear state
-        int pointCount = _selectedPoints.Count;
+        int pointCount = _selectedPoints.Count + _selectedStartPoints.Count;
 
         // Recalculate bend angles for all affected busbars
         var affectedBusbars = _selectedPoints.Select(p => p.busbar).Distinct().ToList();
@@ -735,6 +807,7 @@ public partial class MainWindow : Window
         _currentMoveDirection = MoveDirection.None;
         ResetDirectionButtonColors();
         _originalPointPositions.Clear();
+        _originalStartPointPositions.Clear();
         _hasPreviewMove = false;
 
         UpdateStatusBar($"Move applied to {pointCount} point(s)");
@@ -804,6 +877,10 @@ public partial class MainWindow : Window
             {
                 SetBusbarPointDirect(key.Item1, key.Item2, originalPos);
             }
+            foreach (var (sp, originalPos) in _originalStartPointPositions)
+            {
+                sp.Position = originalPos;
+            }
 
             var activeLayer = _currentProject.GetActiveLayer();
             if (activeLayer != null)
@@ -825,6 +902,7 @@ public partial class MainWindow : Window
         _currentMoveDirection = MoveDirection.None;
         ResetDirectionButtonColors();
         _originalPointPositions.Clear();
+        _originalStartPointPositions.Clear();
         _hasPreviewMove = false;
 
         UpdateStatusBar("Move cancelled");
@@ -843,7 +921,7 @@ public partial class MainWindow : Window
         if (e.LeftButton == MouseButtonState.Pressed)
         {
             _isDraggingMoveControls = true;
-            _dragStartPoint = e.GetPosition(drawingCanvas);
+            _dragStartPoint = e.GetPosition(overlayCanvas);
             moveDragHandle.CaptureMouse();
             e.Handled = true;
         }
@@ -853,15 +931,15 @@ public partial class MainWindow : Window
     {
         if (_isDraggingMoveControls && e.LeftButton == MouseButtonState.Pressed)
         {
-            var currentPos = e.GetPosition(drawingCanvas);
+            var currentPos = e.GetPosition(overlayCanvas);
             var offset = currentPos - _dragStartPoint;
 
             double newLeft = Canvas.GetLeft(moveControlsGrid) + offset.X;
             double newTop = Canvas.GetTop(moveControlsGrid) + offset.Y;
 
-            // Keep within canvas bounds
-            newLeft = Math.Max(0, Math.Min(newLeft, drawingCanvas.ActualWidth - moveControlsGrid.ActualWidth));
-            newTop = Math.Max(0, Math.Min(newTop, drawingCanvas.ActualHeight - moveControlsGrid.ActualHeight));
+            // Keep within viewport bounds
+            newLeft = Math.Max(0, Math.Min(newLeft, overlayCanvas.ActualWidth - moveControlsGrid.ActualWidth));
+            newTop = Math.Max(0, Math.Min(newTop, overlayCanvas.ActualHeight - moveControlsGrid.ActualHeight));
 
             Canvas.SetLeft(moveControlsGrid, newLeft);
             Canvas.SetTop(moveControlsGrid, newTop);
@@ -884,73 +962,127 @@ public partial class MainWindow : Window
     private void HandlePointSelection(MouseButtonEventArgs e)
     {
         var clickPos = GetCanvasMousePosition(e);
-        const double selectionRadius = 10.0; // Distance threshold for selecting a point
-
-        // Find the nearest point within selection radius
-        Busbar? nearestBusbar = null;
-        int nearestPointIndex = -1;
-        double nearestDistance = selectionRadius;
+        const double selectionRadius = 10.0;
 
         var currentLayer = _currentProject.GetActiveLayer();
         if (currentLayer == null) return;
 
-        // Check all busbars and their points
+        // Find nearest busbar point
+        Busbar? nearestBusbar = null;
+        int nearestPointIndex = -1;
+        double nearestBusbarDist = selectionRadius;
+
         foreach (var busbar in currentLayer.Busbars)
         {
             for (int i = 0; i <= busbar.Segments.Count; i++)
             {
                 var point = GetBusbarPoint(busbar, i);
                 double distance = point.DistanceTo(clickPos);
-
-                if (distance < nearestDistance)
+                if (distance < nearestBusbarDist)
                 {
-                    nearestDistance = distance;
+                    nearestBusbarDist = distance;
                     nearestBusbar = busbar;
                     nearestPointIndex = i;
                 }
             }
         }
 
-        // If we found a point, toggle its selection
-        if (nearestBusbar != null && nearestPointIndex >= 0)
+        // Find nearest start point
+        StartPoint? nearestStartPoint = null;
+        double nearestStartDist = selectionRadius;
+
+        foreach (var sp in currentLayer.StartPoints)
         {
-            var pointKey = (nearestBusbar, nearestPointIndex);
-            int existingIndex = _selectedPoints.FindIndex(p => p.busbar == nearestBusbar && p.pointIndex == nearestPointIndex);
-
-            if (existingIndex >= 0)
+            double distance = sp.Position.DistanceTo(clickPos);
+            if (distance < nearestStartDist)
             {
-                // Deselect: remove from list and remove visual marker
-                _selectedPoints.RemoveAt(existingIndex);
-                if (existingIndex < _selectedPointMarkers.Count)
-                {
-                    drawingCanvas.Children.Remove(_selectedPointMarkers[existingIndex]);
-                    _selectedPointMarkers.RemoveAt(existingIndex);
-                }
-                UpdateStatusBar($"Point deselected. {_selectedPoints.Count} point(s) selected.");
+                nearestStartDist = distance;
+                nearestStartPoint = sp;
             }
-            else
+        }
+
+        // Select whichever is closest (busbar point or start point)
+        // If both at same location, select both
+        bool selectedBusbarPoint = false;
+        bool selectedStartPointItem = false;
+
+        if (nearestBusbar != null && nearestPointIndex >= 0 &&
+            (nearestStartPoint == null || nearestBusbarDist <= nearestStartDist))
+        {
+            ToggleBusbarPointSelection(nearestBusbar, nearestPointIndex);
+            selectedBusbarPoint = true;
+
+            // Also select co-located start point if within threshold
+            if (nearestStartPoint != null && nearestStartDist <= selectionRadius)
             {
-                // Select: add to list and add visual marker
-                _selectedPoints.Add(pointKey);
-
-                var point = GetBusbarPoint(nearestBusbar, nearestPointIndex);
-
-                var marker = new Ellipse
-                {
-                    Width = 8,
-                    Height = 8,
-                    Stroke = System.Windows.Media.Brushes.Blue,
-                    StrokeThickness = 2,
-                    Fill = System.Windows.Media.Brushes.Transparent
-                };
-
-                Canvas.SetLeft(marker, point.X - 4);
-                Canvas.SetTop(marker, point.Y - 4);
-                drawingCanvas.Children.Add(marker);
-                _selectedPointMarkers.Add(marker);
-
-                UpdateStatusBar($"Point selected. {_selectedPoints.Count} point(s) selected. Use arrows to set direction, type dimension and press Enter.");
+                ToggleStartPointSelection(nearestStartPoint);
+                selectedStartPointItem = true;
             }
+        }
+        else if (nearestStartPoint != null)
+        {
+            ToggleStartPointSelection(nearestStartPoint);
+            selectedStartPointItem = true;
+
+            // Also select co-located busbar point if within threshold
+            if (nearestBusbar != null && nearestBusbarDist <= selectionRadius)
+            {
+                ToggleBusbarPointSelection(nearestBusbar, nearestPointIndex);
+                selectedBusbarPoint = true;
+            }
+        }
+
+        int totalSelected = _selectedPoints.Count + _selectedStartPoints.Count;
+        if (selectedBusbarPoint || selectedStartPointItem)
+            UpdateStatusBar($"{totalSelected} point(s) selected. Use arrows to set direction, type dimension and press Enter.");
+    }
+
+    private void ToggleBusbarPointSelection(Busbar busbar, int pointIndex)
+    {
+        int existingIndex = _selectedPoints.FindIndex(p => p.busbar == busbar && p.pointIndex == pointIndex);
+
+        if (existingIndex >= 0)
+        {
+            _selectedPoints.RemoveAt(existingIndex);
+            if (existingIndex < _selectedPointMarkers.Count)
+            {
+                drawingCanvas.Children.Remove(_selectedPointMarkers[existingIndex]);
+                _selectedPointMarkers.RemoveAt(existingIndex);
+            }
+        }
+        else
+        {
+            _selectedPoints.Add((busbar, pointIndex));
+            var point = GetBusbarPoint(busbar, pointIndex);
+
+            var marker = new Ellipse
+            {
+                Width = 8,
+                Height = 8,
+                Stroke = System.Windows.Media.Brushes.Blue,
+                StrokeThickness = 2,
+                Fill = System.Windows.Media.Brushes.Transparent
+            };
+
+            Canvas.SetLeft(marker, point.X - 4);
+            Canvas.SetTop(marker, point.Y - 4);
+            drawingCanvas.Children.Add(marker);
+            _selectedPointMarkers.Add(marker);
+        }
+    }
+
+    private void ToggleStartPointSelection(StartPoint sp)
+    {
+        int existingIndex = _selectedStartPoints.IndexOf(sp);
+
+        if (existingIndex >= 0)
+        {
+            _selectedStartPoints.RemoveAt(existingIndex);
+            // Marker is shared with busbar point markers, handled by visual overlap
+        }
+        else
+        {
+            _selectedStartPoints.Add(sp);
         }
     }
 
@@ -962,22 +1094,22 @@ public partial class MainWindow : Window
         if (_handToolActive)
         {
             btnHand.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 200));
-            drawingCanvas.Cursor = System.Windows.Input.Cursors.Hand;
+            canvasContainer.Cursor = System.Windows.Input.Cursors.Hand;
             UpdateStatusBar("Hand tool active - Click and drag to pan");
         }
         else
         {
             btnHand.ClearValue(System.Windows.Controls.Control.BackgroundProperty);
-            drawingCanvas.Cursor = System.Windows.Input.Cursors.Arrow;
+            canvasContainer.Cursor = System.Windows.Input.Cursors.Arrow;
             UpdateStatusBar("Hand tool deactivated");
         }
     }
 
     private void ZoomAtCenter(double zoomFactor)
     {
-        // Zoom centered on canvas
-        double centerX = drawingCanvas.ActualWidth / 2;
-        double centerY = drawingCanvas.ActualHeight / 2;
+        // Zoom centered on viewport
+        double centerX = canvasContainer.ActualWidth / 2;
+        double centerY = canvasContainer.ActualHeight / 2;
 
         var centerPoint = new System.Windows.Point(centerX, centerY);
 
@@ -1033,12 +1165,12 @@ public partial class MainWindow : Window
         double totalHeight = busbarBottom - busbarTop;
 
         // Get canvas actual size
-        double canvasWidth = drawingCanvas.ActualWidth > 0 ? drawingCanvas.ActualWidth : 800;
-        double canvasHeight = drawingCanvas.ActualHeight > 0 ? drawingCanvas.ActualHeight : 600;
+        double viewportWidth = canvasContainer.ActualWidth > 0 ? canvasContainer.ActualWidth : 800;
+        double viewportHeight = canvasContainer.ActualHeight > 0 ? canvasContainer.ActualHeight : 600;
 
         // Calculate scale to fit
-        double scaleX = (canvasWidth * 0.9) / totalWidth;
-        double scaleY = (canvasHeight * 0.9) / totalHeight;
+        double scaleX = (viewportWidth * 0.9) / totalWidth;
+        double scaleY = (viewportHeight * 0.9) / totalHeight;
         double scale = Math.Min(scaleX, scaleY);
 
         // Apply scale
@@ -1046,12 +1178,15 @@ public partial class MainWindow : Window
         _scaleTransform.ScaleY = scale;
 
         // Center the busbars
-        _translateTransform.X = (canvasWidth - totalWidth * scale) / 2 - (busbarLeft * scale);
-        _translateTransform.Y = (canvasHeight - totalHeight * scale) / 2 - (busbarTop * scale);
+        _translateTransform.X = (viewportWidth - totalWidth * scale) / 2 - (busbarLeft * scale);
+        _translateTransform.Y = (viewportHeight - totalHeight * scale) / 2 - (busbarTop * scale);
     }
 
     private void StartDrawing()
     {
+        // Exit start point mode if active
+        if (_isStartPointMode) ExitStartPointMode();
+
         _isDrawing = true;
         _currentPoints.Clear();
         _currentSegments.Clear();
@@ -1077,12 +1212,15 @@ public partial class MainWindow : Window
         // Show snap reference line if there's an existing busbar
         ShowSnapReferenceLine();
 
+        // Show start point markers so user can see snap targets
+        RedrawAllStartPointMarkers();
+
         // Disable Tab navigation during drawing to prevent focus changes
-        KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.None);
+        KeyboardNavigation.SetTabNavigation(canvasContainer, KeyboardNavigationMode.None);
         KeyboardNavigation.SetTabNavigation(this, KeyboardNavigationMode.None);
 
         // Set focus to canvas to ensure mouse events work properly
-        drawingCanvas.Focus();
+        canvasContainer.Focus();
 
         UpdateStatusBar("Drawing mode: Click to add points. Right-click or ESC to finish.");
     }
@@ -1488,18 +1626,17 @@ public partial class MainWindow : Window
 
     private Point2D GetCanvasMousePosition(System.Windows.Input.MouseEventArgs e)
     {
-        // Get position in canvas coordinate space
-        // When using RenderTransform on canvas, GetPosition returns coordinates
-        // in the element's coordinate space, which is exactly what we need
-        var point = e.GetPosition(drawingCanvas);
-        return new Point2D(point.X, point.Y);
+        // Get position relative to the container (which has no transform)
+        // then manually inverse-transform to get canvas-local coordinates
+        var screenPoint = e.GetPosition(canvasContainer);
+        double canvasX = (screenPoint.X - _translateTransform.X) / _scaleTransform.ScaleX;
+        double canvasY = (screenPoint.Y - _translateTransform.Y) / _scaleTransform.ScaleY;
+        return new Point2D(canvasX, canvasY);
     }
 
     private double SnapAngle(double angle)
     {
-        const double snapAngleDeg = 10.0;
         const double maxAngleDeg = 90.0;
-        double angleDeg = angle * 180.0 / Math.PI;
 
         // Limit angle to ±90 degrees (limit angle between consecutive segments)
         // We need to calculate the relative angle from the previous segment
@@ -1531,29 +1668,45 @@ public partial class MainWindow : Window
 
             // Convert back to absolute angle
             angle = prevAngleRad + (relativeAngleDeg * Math.PI / 180.0);
-            angleDeg = angle * 180.0 / Math.PI;
         }
 
-        // Check for horizontal snap (0° from the right or 180° from the left)
-        if (Math.Abs(angleDeg) <= snapAngleDeg)
+        return angle;
+    }
+
+    /// <summary>
+    /// Snap endpoint to horizontal or vertical alignment with startPoint.
+    /// If the angle from start to end is within threshold of H/V, snaps the endpoint.
+    /// Returns the (possibly snapped) endpoint.
+    /// </summary>
+    private Point2D SnapEndpointHV(Point2D startPoint, Point2D endPoint)
+    {
+        if (!_hvSnapEnabled) return endPoint;
+
+        const double snapThresholdDeg = 10.0;
+
+        double dx = endPoint.X - startPoint.X;
+        double dy = endPoint.Y - startPoint.Y;
+
+        if (Math.Abs(dx) < 0.01 && Math.Abs(dy) < 0.01) return endPoint;
+
+        double angleDeg = Math.Atan2(dy, dx) * 180.0 / Math.PI;
+
+        // Near horizontal (0° or ±180°): snap Y to match start
+        if (Math.Abs(angleDeg) <= snapThresholdDeg ||
+            Math.Abs(angleDeg - 180) <= snapThresholdDeg ||
+            Math.Abs(angleDeg + 180) <= snapThresholdDeg)
         {
-            return 0;  // Snap to 0° (right)
-        }
-        else if (Math.Abs(angleDeg - 180) <= snapAngleDeg || Math.Abs(angleDeg + 180) <= snapAngleDeg)
-        {
-            return Math.PI;  // Snap to 180° (left)
-        }
-        // Check for vertical snap (90° down or -90° up)
-        else if (Math.Abs(angleDeg - 90) <= snapAngleDeg)
-        {
-            return Math.PI / 2;  // Snap to 90° (down)
-        }
-        else if (Math.Abs(angleDeg + 90) <= snapAngleDeg)
-        {
-            return -Math.PI / 2;  // Snap to -90° (up)
+            return new Point2D(endPoint.X, startPoint.Y);
         }
 
-        return angle;  // No snap, return original angle
+        // Near vertical (90° or -90°): snap X to match start
+        if (Math.Abs(angleDeg - 90) <= snapThresholdDeg ||
+            Math.Abs(angleDeg + 90) <= snapThresholdDeg)
+        {
+            return new Point2D(startPoint.X, endPoint.Y);
+        }
+
+        return endPoint;
     }
 
     /// <summary>
@@ -1607,6 +1760,13 @@ public partial class MainWindow : Window
     // Canvas Event Handlers
     private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        // Handle Start Point mode
+        if (_isStartPointMode)
+        {
+            HandleStartPointClick(e);
+            return;
+        }
+
         // Handle Move Points mode
         if (_isMovePointsMode)
         {
@@ -1640,6 +1800,17 @@ public partial class MainWindow : Window
 
         // Get the canvas mouse position
         var pt = GetCanvasMousePosition(e);
+
+        // Snap to start points when placing first point (I/O mode, NOT hybrid)
+        if (_currentPoints.Count == 0)
+        {
+            Point2D? nearStartPt = FindNearestStartPoint(pt, 10.0);
+            if (nearStartPt != null)
+            {
+                pt = nearStartPt.Value;
+                // Do NOT set _previousPointWasSnapped - this keeps I/O mode (not hybrid)
+            }
+        }
 
         // Reset the adjustment tracking for the new segment
         _currentSegmentAdjustment = 0;
@@ -1690,14 +1861,16 @@ public partial class MainWindow : Window
         // If not using dynamic snap, check regular reference line snapping
         if (!usedDynamicSnap && (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0))
         {
-            Point2D snappedPos = SnapToReferenceLine(pt);
-            // Only snap if cursor is within snapping distance (10mm)
-            double snapDistance = pt.DistanceTo(snappedPos);
-            if (snapDistance <= 10.0)
+            Point2D? snappedPos = SnapToReferenceLine(pt);
+            if (snappedPos.HasValue)
             {
-                pt = snappedPos;
-                isSnappedToReferenceLine = true;
-                UpdateStatusBar($"Snapped to reference line (distance: {snapDistance:F1}mm)");
+                double snapDistance = pt.DistanceTo(snappedPos.Value);
+                if (snapDistance <= 10.0)
+                {
+                    pt = snappedPos.Value;
+                    isSnappedToReferenceLine = true;
+                    UpdateStatusBar($"Snapped to reference line (distance: {snapDistance:F1}mm)");
+                }
             }
         }
 
@@ -1817,6 +1990,9 @@ public partial class MainWindow : Window
 
             // Update pt to the calculated center position
             pt = centerClick;
+
+            // Apply H/V snap on the final endpoint
+            pt = SnapEndpointHV(adjustedLastPoint, pt);
 
             // Also update the previous segment's endpoint if it was adjusted
             if (Math.Abs(adjustedLastPoint.X - lastPoint.X) > 0.01 || Math.Abs(adjustedLastPoint.Y - lastPoint.Y) > 0.01)
@@ -2422,6 +2598,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Handle Start Point mode preview
+        if (_isStartPointMode)
+        {
+            HandleStartPointMouseMove(e);
+            return;
+        }
+
         // Handle live preview drawing
         if (!_isDrawing) return;
 
@@ -2465,14 +2648,23 @@ public partial class MainWindow : Window
         // Need at least one point to use dynamic line snapping
         if (_currentPoints.Count == 0)
         {
-            // No points yet, but still check for reference line snapping (if not disabled)
-            if (!_isSnappingDisabled && (_snapReferenceLine != null || _snapReferenceLineEnd != null))
+            // Check start point snapping first
+            Point2D? nearStartPt = FindNearestStartPoint(currentPt, 10.0);
+            if (nearStartPt != null)
             {
-                Point2D refSnappedPos = SnapToReferenceLine(currentPt);
-                double refSnapDistance = currentPt.DistanceTo(refSnappedPos);
-                if (refSnapDistance <= 10.0)
+                snappedCursor = nearStartPt.Value;
+            }
+            // Then check reference line snapping (if not disabled)
+            else if (!_isSnappingDisabled && (_snapReferenceLine != null || _snapReferenceLineEnd != null))
+            {
+                Point2D? refSnappedPos = SnapToReferenceLine(currentPt);
+                if (refSnappedPos.HasValue)
                 {
-                    snappedCursor = refSnappedPos;
+                    double refSnapDistance = currentPt.DistanceTo(refSnappedPos.Value);
+                    if (refSnapDistance <= 10.0)
+                    {
+                        snappedCursor = refSnappedPos.Value;
+                    }
                 }
             }
 
@@ -2532,22 +2724,24 @@ public partial class MainWindow : Window
             // If not using dynamic snap, check regular reference line snapping
             if (!usedDynamicSnap && (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0))
             {
-                Point2D refSnappedPos = SnapToReferenceLine(currentPt);
-                double refSnapDistance = currentPt.DistanceTo(refSnappedPos);
-                if (refSnapDistance <= 10.0)
+                Point2D? refSnappedPos = SnapToReferenceLine(currentPt);
+                if (refSnappedPos.HasValue)
                 {
-                    snappedCursor = refSnappedPos;
-                    isSnappedToReferenceLine = true;
-                    // Debug: Show snap status
-                    string mode = _currentProject.DimensionMode.ToString();
-                    UpdateStatusBar($"[MOVE] Snapped to ref line - Mode: {mode}, Dist: {refSnapDistance:F1}mm");
+                    double refSnapDistance = currentPt.DistanceTo(refSnappedPos.Value);
+                    if (refSnapDistance <= 10.0)
+                    {
+                        snappedCursor = refSnappedPos.Value;
+                        isSnappedToReferenceLine = true;
+                        // Debug: Show snap status
+                        string mode = _currentProject.DimensionMode.ToString();
+                        UpdateStatusBar($"[MOVE] Snapped to ref line - Mode: {mode}, Dist: {refSnapDistance:F1}mm");
 
                     // Check if we're snapping to a corner diagonal reference line
                     // If so, we should create a dynamic line
                     // Reset disabled flag if we're snapping to a different point than the one that was disabled
                     if (_dynamicSnapDisabled && _dynamicSnapDisabledForPoint != null)
                     {
-                        double distToDisabledPoint = refSnappedPos.DistanceTo(_dynamicSnapDisabledForPoint.Value);
+                        double distToDisabledPoint = refSnappedPos.Value.DistanceTo(_dynamicSnapDisabledForPoint.Value);
                         // Diagonal snap points are spaced ~14mm apart, so use 5mm threshold to detect different point
                         if (distToDisabledPoint > 5.0)
                         {
@@ -2732,6 +2926,7 @@ public partial class MainWindow : Window
                         }
                         }
                     }
+                }
                 }
             }
         }
@@ -2971,6 +3166,14 @@ public partial class MainWindow : Window
             adjustedLastPoint.X + length * Math.Cos(angle),
             adjustedLastPoint.Y + length * Math.Sin(angle)
         );
+
+        // Apply H/V snap on the final endpoint
+        if (!isSnappedToReferenceLine)
+        {
+            endPoint = SnapEndpointHV(adjustedLastPoint, endPoint);
+            // Recalculate angle after snap
+            angle = Math.Atan2(endPoint.Y - adjustedLastPoint.Y, endPoint.X - adjustedLastPoint.X);
+        }
 
         // Store the pending angle for when user confirms
         _pendingAngle = angle;
@@ -3245,6 +3448,12 @@ public partial class MainWindow : Window
 
     private void Canvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (_isStartPointMode)
+        {
+            ExitStartPointMode();
+            return;
+        }
+
         if (_isDrawing)
         {
             // Cancel any pending input and finish drawing
@@ -3256,28 +3465,21 @@ public partial class MainWindow : Window
     private void Canvas_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         // Zoom in/out with mouse wheel
-        // Get position in canvas coordinate space (already transformed)
-        var canvasPoint = e.GetPosition(drawingCanvas);
+        // Get screen position relative to container
+        var screenPoint = e.GetPosition(canvasContainer);
+
+        // Calculate canvas-local position (inverse transform)
+        double fixedX = (screenPoint.X - _translateTransform.X) / _scaleTransform.ScaleX;
+        double fixedY = (screenPoint.Y - _translateTransform.Y) / _scaleTransform.ScaleY;
 
         // Calculate zoom factor (slower for more control)
         double zoomFactor = e.Delta > 0 ? 1.05 : 0.95;
-
-        // Store the canvas point we want to keep fixed
-        double fixedX = canvasPoint.X;
-        double fixedY = canvasPoint.Y;
 
         // Apply zoom
         _scaleTransform.ScaleX *= zoomFactor;
         _scaleTransform.ScaleY *= zoomFactor;
 
-        // Calculate where that point would be in screen space after zoom
-        // We need to adjust the translation so the point stays under the cursor
-        // New screen position = scale * canvas position + translate
-        // We want: screen position to remain the same
-        // So: translate_new = screen_position - scale_new * canvas_position
-
-        // Get the screen position (relative to canvas parent)
-        var screenPoint = e.GetPosition((IInputElement)drawingCanvas.Parent);
+        // Adjust translation so the point under cursor stays fixed
         _translateTransform.X = screenPoint.X - fixedX * _scaleTransform.ScaleX;
         _translateTransform.Y = screenPoint.Y - fixedY * _scaleTransform.ScaleY;
 
@@ -3293,8 +3495,8 @@ public partial class MainWindow : Window
         {
             _isPanning = true;
             _lastPanPoint = e.GetPosition(this);
-            drawingCanvas.Cursor = System.Windows.Input.Cursors.Hand;
-            drawingCanvas.CaptureMouse();
+            canvasContainer.Cursor = System.Windows.Input.Cursors.Hand;
+            canvasContainer.CaptureMouse();
             e.Handled = true;
         }
     }
@@ -3305,8 +3507,8 @@ public partial class MainWindow : Window
         {
             _isPanning = false;
             // Restore cursor based on hand tool state
-            drawingCanvas.Cursor = _handToolActive ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow;
-            drawingCanvas.ReleaseMouseCapture();
+            canvasContainer.Cursor = _handToolActive ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow;
+            canvasContainer.ReleaseMouseCapture();
             e.Handled = true;
         }
     }
@@ -3331,22 +3533,22 @@ public partial class MainWindow : Window
         double totalWidth = busbarRight - busbarLeft;
         double totalHeight = busbarBottom - busbarTop;
 
-        // Get canvas actual size
-        double canvasWidth = drawingCanvas.ActualWidth > 0 ? drawingCanvas.ActualWidth : 800;
-        double canvasHeight = drawingCanvas.ActualHeight > 0 ? drawingCanvas.ActualHeight : 600;
+        // Get viewport actual size
+        double viewportWidth = canvasContainer.ActualWidth > 0 ? canvasContainer.ActualWidth : 800;
+        double viewportHeight = canvasContainer.ActualHeight > 0 ? canvasContainer.ActualHeight : 600;
 
         // Calculate scale to fit with some padding
-        double scaleX = (canvasWidth * 0.9) / totalWidth;
-        double scaleY = (canvasHeight * 0.9) / totalHeight;
+        double scaleX = (viewportWidth * 0.9) / totalWidth;
+        double scaleY = (viewportHeight * 0.9) / totalHeight;
         double scale = Math.Min(scaleX, scaleY);
 
         // Apply scale
         _scaleTransform.ScaleX = scale;
         _scaleTransform.ScaleY = scale;
 
-        // Center the busbar in the canvas
-        _translateTransform.X = (canvasWidth - totalWidth * scale) / 2 - (busbarLeft * scale);
-        _translateTransform.Y = (canvasHeight - totalHeight * scale) / 2 - (busbarTop * scale);
+        // Center the busbar in the viewport
+        _translateTransform.X = (viewportWidth - totalWidth * scale) / 2 - (busbarLeft * scale);
+        _translateTransform.Y = (viewportHeight - totalHeight * scale) / 2 - (busbarTop * scale);
     }
 
     private void DrawPoint(Point2D point, System.Windows.Media.Brush color, double radius = 1)
@@ -4293,16 +4495,16 @@ public partial class MainWindow : Window
         }
     }
 
-    private Point2D SnapToReferenceLine(Point2D clickPoint)
+    private Point2D? SnapToReferenceLine(Point2D clickPoint)
     {
-        if (_snapReferenceLine == null && _snapReferenceLineEnd == null && _snapReferenceLinesCorners.Count == 0) return clickPoint;
+        if (_snapReferenceLine == null && _snapReferenceLineEnd == null && _snapReferenceLinesCorners.Count == 0) return null;
 
         // Get the first busbar to calculate reference line direction
         var activeLayer = _currentProject.GetActiveLayer();
-        if (activeLayer == null || activeLayer.Busbars.Count == 0) return clickPoint;
+        if (activeLayer == null || activeLayer.Busbars.Count == 0) return null;
 
         var targetBusbar = _lastActiveBusbar ?? activeLayer.Busbars[0];
-        if (targetBusbar.Segments.Count == 0) return clickPoint;
+        if (targetBusbar.Segments.Count == 0) return null;
 
         Point2D? closestSnapPoint = null;
         double closestDistance = double.MaxValue;
@@ -4473,7 +4675,7 @@ public partial class MainWindow : Window
             }
         }
 
-        return closestSnapPoint ?? clickPoint;
+        return closestSnapPoint;
     }
 
     private Point2D SnapToDynamicLine(Point2D clickPoint, Point2D lastPoint, out bool shouldBreakSnap)
@@ -4796,14 +4998,71 @@ public partial class MainWindow : Window
             }
         }
 
-        if (e.Key == Key.D && !_isDrawing)
+        // Handle numeric input in Start Point mode
+        if (_isStartPointMode && _startPointAnchor != null)
+        {
+            if ((e.Key >= Key.D0 && e.Key <= Key.D9) ||
+                (e.Key >= Key.NumPad0 && e.Key <= Key.NumPad9) ||
+                e.Key == Key.OemPeriod || e.Key == Key.Decimal)
+            {
+                string digit = "";
+                if (e.Key >= Key.D0 && e.Key <= Key.D9)
+                    digit = ((char)('0' + (e.Key - Key.D0))).ToString();
+                else if (e.Key >= Key.NumPad0 && e.Key <= Key.NumPad9)
+                    digit = ((char)('0' + (e.Key - Key.NumPad0))).ToString();
+                else
+                    digit = ".";
+
+                _startPointTypedDistance += digit;
+                // Redraw preview to show typed distance
+                UpdateStartPointPreviewWithTypedDistance();
+                e.Handled = true;
+                return;
+            }
+            else if (e.Key == Key.Back && _startPointTypedDistance.Length > 0)
+            {
+                _startPointTypedDistance = _startPointTypedDistance.Substring(0, _startPointTypedDistance.Length - 1);
+                UpdateStartPointPreviewWithTypedDistance();
+                e.Handled = true;
+                return;
+            }
+            else if (e.Key == Key.Enter && _startPointTypedDistance.Length > 0)
+            {
+                if (double.TryParse(_startPointTypedDistance, out double dist) && dist > 0)
+                {
+                    _startPointTypedDistance = "";
+                    HandleStartPointDistanceInput(dist);
+                }
+                e.Handled = true;
+                return;
+            }
+            else if (e.Key == Key.Escape && _startPointTypedDistance.Length > 0)
+            {
+                _startPointTypedDistance = "";
+                UpdateStartPointPreviewWithTypedDistance();
+                e.Handled = true;
+                return;
+            }
+        }
+
+        if (e.Key == Key.Escape && _isStartPointMode)
+        {
+            ExitStartPointMode();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.D && !_isDrawing && !_isStartPointMode)
         {
             StartDrawing();
             e.Handled = true;
         }
-        else if (e.Key == Key.M && !_isDrawing)
+        else if (e.Key == Key.M && !_isDrawing && !_isStartPointMode)
         {
             MovePoints_Click(this, new RoutedEventArgs());
+            e.Handled = true;
+        }
+        else if (e.Key == Key.S && !_isDrawing && !_isMovePointsMode)
+        {
+            StartPoints_Click(this, new RoutedEventArgs());
             e.Handled = true;
         }
         else if (e.Key == Key.Escape && _isMovePointsMode)
@@ -4824,7 +5083,7 @@ public partial class MainWindow : Window
         {
             // Prevent Tab from changing focus during drawing mode (unless editing in DataGrid)
             e.Handled = true;
-            drawingCanvas.Focus();
+            canvasContainer.Focus();
         }
         else if (e.Key == Key.Escape && _isDrawing)
         {
@@ -5276,5 +5535,331 @@ public partial class MainWindow : Window
         {
             _busbarRenderer.RedrawAllBusbars(activeLayer, _lastActiveBusbar, _currentProject.DimensionMode);
         }
+    }
+
+    // ==================== Start Point Mode ====================
+
+    private void StartPoints_Click(object sender, RoutedEventArgs e)
+    {
+        _isStartPointMode = !_isStartPointMode;
+
+        if (_isStartPointMode)
+        {
+            // Deactivate other modes
+            if (_isDrawing) FinishDrawing();
+            if (_isMovePointsMode) MovePoints_Click(this, new RoutedEventArgs());
+            if (_handToolActive) Hand_Click(this, new RoutedEventArgs());
+
+            btnStartPoints.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 230, 200));
+            _startPointAnchor = null;
+            _startPointAnchorIsBusbarPoint = false;
+
+            RedrawAllStartPointMarkers();
+            UpdateStatusBar("Start Point mode: Click to place points. Type distance for exact spacing. Right-click or ESC to exit.");
+        }
+        else
+        {
+            ExitStartPointMode();
+        }
+    }
+
+    private void ExitStartPointMode()
+    {
+        _isStartPointMode = false;
+        _startPointAnchor = null;
+        _startPointAnchorIsBusbarPoint = false;
+        _startPointTypedDistance = "";
+        btnStartPoints.Background = System.Windows.Media.Brushes.Transparent;
+
+        ClearStartPointPreview();
+        ClearStartPointMarkers();
+        UpdateStatusBar("Ready");
+    }
+
+    private void HandleStartPointClick(MouseButtonEventArgs e)
+    {
+        _startPointTypedDistance = ""; // Clear any typed distance on click
+        var clickPos = GetCanvasMousePosition(e);
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        if (_startPointAnchor == null)
+        {
+            // First click: snap to existing busbar point if nearby for precise positioning
+            Point2D? nearBusbarPoint = FindNearestBusbarPoint(clickPos, 10.0);
+            Point2D pos = nearBusbarPoint ?? clickPos;
+
+            // Always create a start point (even at busbar point locations)
+            // Start points persist independently so they survive busbar deletion
+            var sp = new StartPoint(pos);
+            currentLayer.StartPoints.Add(sp);
+            _startPointAnchor = pos;
+            _startPointAnchorIsBusbarPoint = nearBusbarPoint != null;
+            DrawStartPointMarker(pos);
+            string snapInfo = _startPointAnchorIsBusbarPoint ? " (snapped to busbar point)" : "";
+            UpdateStatusBar($"Start point placed{snapInfo}. Click for next point, or type distance.");
+        }
+        else
+        {
+            // Subsequent click: calculate position with H/V snap
+            Point2D newPos = SnapEndpointHV(_startPointAnchor.Value, clickPos);
+            double distance = _startPointAnchor.Value.DistanceTo(newPos);
+
+            var sp = new StartPoint(newPos);
+            currentLayer.StartPoints.Add(sp);
+            DrawStartPointMarker(newPos);
+
+            _startPointAnchor = newPos;
+            _startPointAnchorIsBusbarPoint = false;
+            UpdateStatusBar($"Start point placed at distance {distance:F1}mm. Click for next, or type distance.");
+        }
+    }
+
+    private void HandleStartPointMouseMove(System.Windows.Input.MouseEventArgs e)
+    {
+        // Don't update preview from mouse if user is typing a distance
+        if (_startPointTypedDistance.Length > 0) return;
+
+        ClearStartPointPreview();
+
+        var currentPt = GetCanvasMousePosition(e);
+
+        if (_startPointAnchor == null)
+        {
+            // No anchor yet - just show a green dot following the cursor
+            // Snap to nearby busbar points for visual feedback
+            Point2D? nearBusbar = FindNearestBusbarPoint(currentPt, 10.0);
+            Point2D dotPos = nearBusbar ?? currentPt;
+
+            _startPointPreviewDot = new Ellipse
+            {
+                Width = 6,
+                Height = 6,
+                Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0)),
+                StrokeThickness = 1.5,
+                Fill = System.Windows.Media.Brushes.Transparent,
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(_startPointPreviewDot, dotPos.X - 3);
+            Canvas.SetTop(_startPointPreviewDot, dotPos.Y - 3);
+            drawingCanvas.Children.Add(_startPointPreviewDot);
+            return;
+        }
+
+        Point2D targetPos = SnapEndpointHV(_startPointAnchor.Value, currentPt);
+        double distance = _startPointAnchor.Value.DistanceTo(targetPos);
+        _startPointLastAngle = Math.Atan2(targetPos.Y - _startPointAnchor.Value.Y, targetPos.X - _startPointAnchor.Value.X);
+
+        DrawStartPointPreview(targetPos, distance);
+    }
+
+    private void DrawStartPointPreview(Point2D targetPos, double distance)
+    {
+        // Preview line from anchor to target
+        _startPointPreviewLine = new Line
+        {
+            X1 = _startPointAnchor!.Value.X,
+            Y1 = _startPointAnchor.Value.Y,
+            X2 = targetPos.X,
+            Y2 = targetPos.Y,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0)),
+            StrokeThickness = 0.5,
+            StrokeDashArray = new DoubleCollection { 4, 2 },
+            IsHitTestVisible = false
+        };
+        drawingCanvas.Children.Add(_startPointPreviewLine);
+
+        // Preview dot at target
+        _startPointPreviewDot = new Ellipse
+        {
+            Width = 6,
+            Height = 6,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0)),
+            StrokeThickness = 1.5,
+            Fill = System.Windows.Media.Brushes.Transparent,
+            IsHitTestVisible = false
+        };
+        Canvas.SetLeft(_startPointPreviewDot, targetPos.X - 3);
+        Canvas.SetTop(_startPointPreviewDot, targetPos.Y - 3);
+        drawingCanvas.Children.Add(_startPointPreviewDot);
+
+        // Distance label (show typed distance if typing, otherwise measured distance)
+        string distText = _startPointTypedDistance.Length > 0
+            ? $"[{_startPointTypedDistance}] mm"
+            : $"{distance:F1}mm";
+
+        double labelX = (targetPos.X + _startPointAnchor.Value.X) / 2;
+        double labelY = (targetPos.Y + _startPointAnchor.Value.Y) / 2 - 10;
+        _startPointDistanceLabel = new TextBlock
+        {
+            Text = distText,
+            FontSize = 10,
+            Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 140, 0)),
+            FontWeight = _startPointTypedDistance.Length > 0 ? FontWeights.Bold : FontWeights.Normal,
+            IsHitTestVisible = false
+        };
+        Canvas.SetLeft(_startPointDistanceLabel, labelX);
+        Canvas.SetTop(_startPointDistanceLabel, labelY);
+        drawingCanvas.Children.Add(_startPointDistanceLabel);
+    }
+
+    private void UpdateStartPointPreviewWithTypedDistance()
+    {
+        if (_startPointAnchor == null) return;
+
+        ClearStartPointPreview();
+
+        if (_startPointTypedDistance.Length > 0 &&
+            double.TryParse(_startPointTypedDistance, out double typedDist) && typedDist > 0)
+        {
+            // Show preview at typed distance along last angle
+            Point2D targetPos = new Point2D(
+                _startPointAnchor.Value.X + typedDist * Math.Cos(_startPointLastAngle),
+                _startPointAnchor.Value.Y + typedDist * Math.Sin(_startPointLastAngle)
+            );
+            DrawStartPointPreview(targetPos, typedDist);
+        }
+        else
+        {
+            // Just show the typed text as a label near anchor
+            _startPointDistanceLabel = new TextBlock
+            {
+                Text = $"[{_startPointTypedDistance}] mm",
+                FontSize = 10,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 140, 0)),
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(_startPointDistanceLabel, _startPointAnchor.Value.X + 10);
+            Canvas.SetTop(_startPointDistanceLabel, _startPointAnchor.Value.Y - 15);
+            drawingCanvas.Children.Add(_startPointDistanceLabel);
+        }
+
+        UpdateStatusBar($"Type distance: {_startPointTypedDistance}mm  (Enter to confirm, Esc to cancel, Backspace to edit)");
+    }
+
+
+    private void HandleStartPointDistanceInput(double distance)
+    {
+        if (_startPointAnchor == null) return;
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        // Use the stored angle from last mouse preview
+        Point2D newPos = new Point2D(
+            _startPointAnchor.Value.X + distance * Math.Cos(_startPointLastAngle),
+            _startPointAnchor.Value.Y + distance * Math.Sin(_startPointLastAngle)
+        );
+
+        var sp = new StartPoint(newPos);
+        currentLayer.StartPoints.Add(sp);
+        DrawStartPointMarker(newPos);
+
+        _startPointAnchor = newPos;
+        _startPointAnchorIsBusbarPoint = false;
+        ClearStartPointPreview();
+        UpdateStatusBar($"Start point placed at {distance:F1}mm. Click for next, or type distance.");
+    }
+
+    private Point2D? FindNearestBusbarPoint(Point2D position, double maxDistance)
+    {
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return null;
+
+        Point2D? nearest = null;
+        double nearestDist = maxDistance;
+
+        foreach (var busbar in currentLayer.Busbars)
+        {
+            for (int i = 0; i <= busbar.Segments.Count; i++)
+            {
+                var point = GetBusbarPoint(busbar, i);
+                double dist = point.DistanceTo(position);
+                if (dist < nearestDist)
+                {
+                    nearestDist = dist;
+                    nearest = point;
+                }
+            }
+        }
+
+        return nearest;
+    }
+
+    private void DrawStartPointMarker(Point2D position)
+    {
+        var marker = new Ellipse
+        {
+            Width = 6,
+            Height = 6,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0)),
+            StrokeThickness = 1.5,
+            Fill = System.Windows.Media.Brushes.Transparent
+        };
+        Canvas.SetLeft(marker, position.X - 3);
+        Canvas.SetTop(marker, position.Y - 3);
+        drawingCanvas.Children.Add(marker);
+        _startPointMarkers.Add(marker);
+    }
+
+    private void RedrawAllStartPointMarkers()
+    {
+        ClearStartPointMarkers();
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        foreach (var sp in currentLayer.StartPoints)
+        {
+            DrawStartPointMarker(sp.Position);
+        }
+    }
+
+    private void ClearStartPointMarkers()
+    {
+        foreach (var marker in _startPointMarkers)
+        {
+            drawingCanvas.Children.Remove(marker);
+        }
+        _startPointMarkers.Clear();
+    }
+
+    private void ClearStartPointPreview()
+    {
+        if (_startPointPreviewLine != null)
+        {
+            drawingCanvas.Children.Remove(_startPointPreviewLine);
+            _startPointPreviewLine = null;
+        }
+        if (_startPointPreviewDot != null)
+        {
+            drawingCanvas.Children.Remove(_startPointPreviewDot);
+            _startPointPreviewDot = null;
+        }
+        if (_startPointDistanceLabel != null)
+        {
+            drawingCanvas.Children.Remove(_startPointDistanceLabel);
+            _startPointDistanceLabel = null;
+        }
+    }
+
+    private Point2D? FindNearestStartPoint(Point2D position, double maxDistance)
+    {
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return null;
+
+        Point2D? nearest = null;
+        double nearestDist = maxDistance;
+
+        foreach (var sp in currentLayer.StartPoints)
+        {
+            double dist = sp.Position.DistanceTo(position);
+            if (dist < nearestDist)
+            {
+                nearestDist = dist;
+                nearest = sp.Position;
+            }
+        }
+
+        return nearest;
     }
 }
