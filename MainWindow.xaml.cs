@@ -94,6 +94,14 @@ public partial class MainWindow : Window
     private bool _dynamicSnapDisabled = false; // Prevent re-creating dynamic line after it's been disabled
     private Point2D? _dynamicSnapDisabledForPoint = null; // Track which snap point disabled the dynamic line
 
+    // ===== OFFSET LINE (triggered by hovering over start/end reference points) =====
+    private Line? _offsetLine = null;
+    private List<Ellipse> _offsetSnapPoints = new List<Ellipse>();
+    private Point2D? _offsetSnapAnchor = null; // The locked point where offset line is anchored
+    private double _offsetSnapAngle = 0; // The angle of the offset line (parallel to segment)
+    private bool _offsetSnapDisabled = false; // Prevent re-creating offset line after it's been disabled
+    private Point2D? _offsetSnapDisabledForPoint = null; // Track which snap point disabled the offset line
+
     // Snapping control
     private bool _hvSnapEnabled = true; // Horizontal/Vertical snap toggle (can be disabled in future)
     private bool _isSnappingDisabled = false; // Universal snapping disable flag (for button and auto-disable after click)
@@ -101,6 +109,7 @@ public partial class MainWindow : Window
     private Busbar? _lastActiveBusbar = null; // Track the last active busbar for snap line reference
     private Busbar? _highlightedBusbar = null; // Track which busbar is currently highlighted
     private bool _previousPointWasSnapped = false; // Track if the previous point was snapped (for hybrid I/O mode)
+    private bool _previewSnappedToReference = false; // Track if the preview endpoint is currently snapped (for DataGrid path)
 
     // Dimension mode adjustment tracking
     private double _currentSegmentAdjustment = 0; // Track how much the previous point was adjusted for I/O mode
@@ -1197,6 +1206,10 @@ public partial class MainWindow : Window
         _isSnappingDisabled = false; // Re-enable snapping for new drawing
         _lastVisibleReferenceLineIndex = -1; // Reset visible reference line tracker
         _previousPointWasSnapped = false; // Reset hybrid mode tracking
+        _previewSnappedToReference = false;
+        HideOffsetLine();
+        _offsetSnapDisabled = false;
+        _offsetSnapDisabledForPoint = null;
         _currentBusbarIndex = -1;
         _waitingForLengthInput = false;  // Reset input state
         _isEditingLength = false;
@@ -1419,6 +1432,7 @@ public partial class MainWindow : Window
         _currentShapes.Clear();
         _segmentsForcedToMinimum.Clear();
         _previousPointWasSnapped = false;
+        _previewSnappedToReference = false;
 
         // Re-enable Tab navigation after drawing ends
         KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.Continue);
@@ -1456,8 +1470,9 @@ public partial class MainWindow : Window
         // Hide snap reference line
         HideSnapReferenceLine();
 
-        // Hide dynamic snap line
+        // Hide dynamic snap line and offset line
         HideDynamicSnapLine();
+        HideOffsetLine();
 
         // Update UI to refresh the busbar list
         UpdateUI();
@@ -1486,6 +1501,9 @@ public partial class MainWindow : Window
                 }
             }), System.Windows.Threading.DispatcherPriority.Loaded);
         }
+
+        // Restore keyboard focus so shortcut keys (D, M, S, etc.) work immediately
+        canvasContainer.Focus();
     }
 
     private double CalculateBendAngle(int segmentIndex)
@@ -1584,6 +1602,7 @@ public partial class MainWindow : Window
         _currentPoints.Clear();
         _segmentsForcedToMinimum.Clear();
         _previousPointWasSnapped = false;
+        _previewSnappedToReference = false;
 
         // Re-enable Tab navigation after drawing is cancelled
         KeyboardNavigation.SetTabNavigation(drawingCanvas, KeyboardNavigationMode.Continue);
@@ -1618,10 +1637,14 @@ public partial class MainWindow : Window
         // Hide snap reference line
         HideSnapReferenceLine();
 
-        // Hide dynamic snap line
+        // Hide dynamic snap line and offset line
         HideDynamicSnapLine();
+        HideOffsetLine();
 
         UpdateStatusBar("Drawing cancelled");
+
+        // Restore keyboard focus so shortcut keys work immediately
+        canvasContainer.Focus();
     }
 
     private Point2D GetCanvasMousePosition(System.Windows.Input.MouseEventArgs e)
@@ -1757,6 +1780,49 @@ public partial class MainWindow : Window
         return refIOLen + centerDiff;
     }
 
+    private double ConvertHybridIOToCenterLength(double ioLength, Point2D segStart, Point2D approxEnd, Busbar referenceBusbar, double thickness, DimensionMode mode)
+    {
+        // Reverse of CalculateHybridIOLength: convert I/O display length to center geometry length
+        // Forward: hybridIO = refIOLen + (centerLen - refCenterLen)
+        // Reverse: centerLen = hybridIO - refIOLen + refCenterLen
+
+        int closestIdx = -1;
+        double closestAvgDist = double.MaxValue;
+
+        for (int i = 0; i < referenceBusbar.Segments.Count; i++)
+        {
+            Point2D refStart = referenceBusbar.Segments[i].StartPoint;
+            Point2D refEnd = referenceBusbar.Segments[i].EndPoint;
+            double avgDist = (segStart.DistanceTo(refStart) + approxEnd.DistanceTo(refEnd)) / 2.0;
+            if (avgDist < closestAvgDist)
+            {
+                closestAvgDist = avgDist;
+                closestIdx = i;
+            }
+        }
+
+        if (closestIdx < 0) return ioLength; // fallback: use as-is
+
+        var refSeg = referenceBusbar.Segments[closestIdx];
+        double refCenterLen = refSeg.Length;
+
+        double refStartOff = 0, refEndOff = 0;
+        if (Math.Abs(refSeg.BendAngle) > 0.001)
+            refStartOff = Busbar.CalculateDimensionOffset(Math.Abs(refSeg.BendAngle), thickness);
+        if (closestIdx + 1 < referenceBusbar.Segments.Count)
+        {
+            double nextBend = referenceBusbar.Segments[closestIdx + 1].BendAngle;
+            if (Math.Abs(nextBend) > 0.001)
+                refEndOff = Busbar.CalculateDimensionOffset(Math.Abs(nextBend), thickness);
+        }
+
+        double refTotalOff = refStartOff + refEndOff;
+        double refAdj = (mode == DimensionMode.Inside) ? refTotalOff : -refTotalOff;
+        double refIOLen = refCenterLen - refAdj;
+
+        return ioLength - refIOLen + refCenterLen;
+    }
+
     // Canvas Event Handlers
     private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -1801,14 +1867,41 @@ public partial class MainWindow : Window
         // Get the canvas mouse position
         var pt = GetCanvasMousePosition(e);
 
+        // Handle snapping with priority: offset line → dynamic line → regular reference lines
+        bool isSnappedToReferenceLine = false;
+        bool usedDynamicSnap = false;
+
         // Snap to start points when placing first point (I/O mode, NOT hybrid)
         if (_currentPoints.Count == 0)
         {
-            Point2D? nearStartPt = FindNearestStartPoint(pt, 10.0);
-            if (nearStartPt != null)
+            // Try offset line snap first (if active from hovering over start/end reference)
+            if (_offsetSnapAnchor != null)
             {
-                pt = nearStartPt.Value;
-                // Do NOT set _previousPointWasSnapped - this keeps I/O mode (not hybrid)
+                bool shouldBreakSnap;
+                Point2D offsetSnappedPos = SnapToOffsetLine(pt, pt, out shouldBreakSnap);
+                if (!shouldBreakSnap)
+                {
+                    pt = offsetSnappedPos;
+                    isSnappedToReferenceLine = true;
+                    usedDynamicSnap = true;
+                }
+                else
+                {
+                    _offsetSnapDisabledForPoint = _offsetSnapAnchor;
+                    HideOffsetLine();
+                    _offsetSnapDisabled = true;
+                }
+            }
+
+            // If not snapped to offset line, try start point snapping
+            if (!isSnappedToReferenceLine)
+            {
+                Point2D? nearStartPt = FindNearestStartPoint(pt, 10.0);
+                if (nearStartPt != null)
+                {
+                    pt = nearStartPt.Value;
+                    // Do NOT set _previousPointWasSnapped - this keeps I/O mode (not hybrid)
+                }
             }
         }
 
@@ -1827,16 +1920,31 @@ public partial class MainWindow : Window
             _previewLine = null;
         }
 
-        // Handle snapping with priority: dynamic line first, then regular reference lines
-        bool isSnappedToReferenceLine = false;
-        bool usedDynamicSnap = false;
-
         if (_currentPoints.Count >= 1)
         {
             var lastPoint = _currentPoints[_currentPoints.Count - 1];
 
-            // First, try dynamic line snapping if we have an active dynamic line
-            if (_dynamicSnapAnchor != null)
+            // First, try offset line snapping if we have an active offset line
+            if (_offsetSnapAnchor != null)
+            {
+                bool shouldBreakSnap;
+                Point2D offsetSnappedPos = SnapToOffsetLine(pt, lastPoint, out shouldBreakSnap);
+
+                if (shouldBreakSnap)
+                {
+                    _offsetSnapDisabledForPoint = _offsetSnapAnchor;
+                    HideOffsetLine();
+                    _offsetSnapDisabled = true;
+                }
+                else
+                {
+                    pt = offsetSnappedPos;
+                    isSnappedToReferenceLine = true;
+                    usedDynamicSnap = true; // Reuse flag — offset line acts like dynamic snap
+                }
+            }
+            // Then try dynamic line snapping
+            else if (_dynamicSnapAnchor != null)
             {
                 bool shouldBreakSnap;
                 Point2D dynamicSnappedPos = SnapToDynamicLine(pt, lastPoint, out shouldBreakSnap);
@@ -1858,7 +1966,7 @@ public partial class MainWindow : Window
             }
         }
 
-        // If not using dynamic snap, check regular reference line snapping
+        // If not using dynamic/offset snap, check regular reference line snapping
         if (!usedDynamicSnap && (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0))
         {
             Point2D? snappedPos = SnapToReferenceLine(pt);
@@ -1887,14 +1995,77 @@ public partial class MainWindow : Window
                 // Hybrid mode: when snapped to reference, draw as CENTER (no point adjustments)
                 // I/O dimension is calculated for display only below
                 bothEndsSnapped = _previousPointWasSnapped && _currentPoints.Count >= 1;
+
+                // Free → Snap: apply I/O adjustment to the previous corner
+                // The snapped endpoint is center-based, but the corner needs adjusting
+                if (!_previousPointWasSnapped && _currentProject.DimensionMode != DimensionMode.Center && previousPoint.HasValue)
+                {
+                    double prevDx = lastPoint.X - previousPoint.Value.X;
+                    double prevDy = lastPoint.Y - previousPoint.Value.Y;
+                    double prevAngle = Math.Atan2(prevDy, prevDx);
+
+                    double currDx = pt.X - lastPoint.X;
+                    double currDy = pt.Y - lastPoint.Y;
+                    double currAngle = Math.Atan2(currDy, currDx);
+
+                    double bendAngleRad = currAngle - prevAngle;
+                    while (bendAngleRad > Math.PI) bendAngleRad -= 2 * Math.PI;
+                    while (bendAngleRad < -Math.PI) bendAngleRad += 2 * Math.PI;
+                    double bendAngleDeg = Math.Abs(bendAngleRad * 180.0 / Math.PI);
+
+                    double offset = Busbar.CalculateDimensionOffset(bendAngleDeg, _currentProject.MaterialSettings.Thickness);
+                    double adjustmentSign = (_currentProject.DimensionMode == DimensionMode.Inside) ? 1.0 : -1.0;
+                    _currentSegmentAdjustment = adjustmentSign * offset;
+
+                    double prevLength = Math.Sqrt(prevDx * prevDx + prevDy * prevDy);
+                    if (prevLength > 0.1)
+                    {
+                        double prevUnitX = prevDx / prevLength;
+                        double prevUnitY = prevDy / prevLength;
+
+                        Point2D adjustedLastPoint = new Point2D(
+                            lastPoint.X + adjustmentSign * offset * prevUnitX,
+                            lastPoint.Y + adjustmentSign * offset * prevUnitY
+                        );
+
+                        // Update the last point in _currentPoints
+                        _currentPoints[_currentPoints.Count - 1] = adjustedLastPoint;
+
+                        // Update the previous segment's length and adjustment
+                        if (_currentSegments.Count > 0 && _currentPoints.Count >= 2)
+                        {
+                            var prevSegmentStart = _currentPoints[_currentPoints.Count - 2];
+                            double newLength = prevSegmentStart.DistanceTo(adjustedLastPoint);
+                            _currentSegments[_currentSegments.Count - 1].Length = newLength;
+
+                            if (_segmentAdjustments.Count > 0)
+                            {
+                                _segmentAdjustments[_segmentAdjustments.Count - 1] = _currentSegmentAdjustment;
+                            }
+                        }
+
+                        // Update the visual blue point marker
+                        for (int i = _currentShapes.Count - 1; i >= 0; i--)
+                        {
+                            if (_currentShapes[i] is Ellipse ellipse &&
+                                ellipse.Fill == Brushes.Blue &&
+                                ellipse.Width == 2)
+                            {
+                                Canvas.SetLeft(ellipse, adjustedLastPoint.X - 1);
+                                Canvas.SetTop(ellipse, adjustedLastPoint.Y - 1);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
             else // Free drawing (not snapped to reference line)
             {
                 Point2D centerClick = pt;
                 Point2D adjustedLastPoint = lastPoint;
 
-                // Skip I/O adjustments if in hybrid mode (once snapped, stay in center mode)
-                if (_currentProject.DimensionMode != DimensionMode.Center && previousPoint.HasValue && !_previousPointWasSnapped)
+                // Apply I/O adjustments in free drawing mode
+                if (_currentProject.DimensionMode != DimensionMode.Center && previousPoint.HasValue)
                 {
                 // Clicked position is corner - convert to center for angle calculation
                 // First, get preliminary angle from center to corner
@@ -1915,21 +2086,8 @@ public partial class MainWindow : Window
                 while (bendAngleRad < -Math.PI) bendAngleRad += 2 * Math.PI;
                 double bendAngleDeg = Math.Abs(bendAngleRad * 180.0 / Math.PI);
 
-                // Calculate adjustment for bends at BOTH ends of the previous segment
-                double startOffset = 0;
-                double endOffset = 0;
-
-                if (_currentSegments.Count > 0)
-                {
-                    double startBendAngle = _currentSegments[_currentSegments.Count - 1].BendAngle;
-                    if (Math.Abs(startBendAngle) > 0.001)
-                    {
-                        startOffset = Busbar.CalculateDimensionOffset(Math.Abs(startBendAngle), _currentProject.MaterialSettings.Thickness);
-                    }
-                }
-
-                endOffset = Busbar.CalculateDimensionOffset(bendAngleDeg, _currentProject.MaterialSettings.Thickness);
-                double totalOffset = startOffset + endOffset;
+                // Calculate offset for the current bend (matches preview and DataGrid behavior)
+                double offset = Busbar.CalculateDimensionOffset(bendAngleDeg, _currentProject.MaterialSettings.Thickness);
 
                 // Adjust last point along previous segment direction (Inside=forward, Outside=backward)
                 double prevLength = Math.Sqrt(prevDx * prevDx + prevDy * prevDy);
@@ -1941,22 +2099,21 @@ public partial class MainWindow : Window
                     double adjustmentSign = (_currentProject.DimensionMode == DimensionMode.Inside) ? 1.0 : -1.0;
 
                     adjustedLastPoint = new Point2D(
-                        lastPoint.X + adjustmentSign * totalOffset * prevUnitX,
-                        lastPoint.Y + adjustmentSign * totalOffset * prevUnitY
+                        lastPoint.X + adjustmentSign * offset * prevUnitX,
+                        lastPoint.Y + adjustmentSign * offset * prevUnitY
                     );
 
-                    // Store the adjustment amount for DataGrid display
-                    _currentSegmentAdjustment = adjustmentSign * totalOffset;
+                    // Store the adjustment amount for display
+                    _currentSegmentAdjustment = adjustmentSign * offset;
                 }
 
                 // Adjust click (corner) to center by moving forward along new segment direction
-                // Use endOffset (current corner bend) for this conversion
                 double newLength = Math.Sqrt(prelimDx * prelimDx + prelimDy * prelimDy);
                 if (newLength > 0.1)
                 {
                     centerClick = new Point2D(
-                        pt.X + endOffset * Math.Cos(prelimAngle),
-                        pt.Y + endOffset * Math.Sin(prelimAngle)
+                        pt.X + offset * Math.Cos(prelimAngle),
+                        pt.Y + offset * Math.Sin(prelimAngle)
                     );
                 }
 
@@ -2012,9 +2169,6 @@ public partial class MainWindow : Window
                     {
                         _segmentAdjustments[_segmentAdjustments.Count - 1] = _currentSegmentAdjustment;
                     }
-
-                    // Reset for the new segment being confirmed (no bend after it yet)
-                    _currentSegmentAdjustment = 0;
                 }
 
                 // Persist the adjusted corner position to _currentPoints
@@ -2044,9 +2198,12 @@ public partial class MainWindow : Window
         // Disable snapping after placing a point until the visible reference line changes
         _isSnappingDisabled = true;
 
-        // Hide the dynamic snap line since we've placed a point
+        // Hide the dynamic snap line and offset line since we've placed a point
         HideDynamicSnapLine();
         _dynamicSnapDisabled = false; // Allow new dynamic line for next segment
+        HideOffsetLine();
+        _offsetSnapDisabled = false; // Allow new offset line for next segment
+        _offsetSnapDisabledForPoint = null;
 
         // Draw the blue point at the clicked location
         DrawPoint(pt, Brushes.Blue);
@@ -2114,9 +2271,8 @@ public partial class MainWindow : Window
             }
         }
 
-        // Once snapped, stay in center mode for the rest of this drawing session
-        if (isSnappedToReferenceLine)
-            _previousPointWasSnapped = true;
+        // Track whether this point was snapped (controls hybrid vs normal I/O mode for next segment)
+        _previousPointWasSnapped = isSnappedToReferenceLine;
 
         UpdateStatusBar($"Point {_currentPoints.Count} added at ({pt.X:F0}, {pt.Y:F0})");
     }
@@ -2167,8 +2323,8 @@ public partial class MainWindow : Window
             Point2D adjustedLastPoint = lastPoint;
             double adjustment = 0;
 
-            // I/O mode adjustment (skip in hybrid mode)
-            if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2)
+            // I/O mode adjustment
+            if (_currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
             {
                 var prevStart = _currentPoints[_currentPoints.Count - 2];
                 var prevEnd = lastPoint;
@@ -2432,8 +2588,12 @@ public partial class MainWindow : Window
         var startPoint = lastPoint;
         double adjustment = 0;
 
-        // I/O mode adjustment (skip in hybrid mode)
-        if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2)
+        // Hybrid mode: both previous and current points are snapped to reference lines
+        // In hybrid mode, geometry stays center-based (no corner adjustments)
+        bool isHybridMode = _previousPointWasSnapped && _previewSnappedToReference;
+
+        // I/O mode adjustment (skip in hybrid mode - geometry stays center-based)
+        if (!isHybridMode && _currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
         {
             var prevStart = _currentPoints[_currentPoints.Count - 2];
             var prevEnd = lastPoint;
@@ -2499,9 +2659,24 @@ public partial class MainWindow : Window
             _currentSegmentAdjustment = adjustment;
         }
 
-        // Convert desiredLength from I/O display dimension to center dimension
-        // User inputs I/O dimension, we add the adjustment to get center dimension
-        double centerLength = desiredLength + adjustment;
+        // Convert desiredLength to center dimension
+        double centerLength;
+        if (isHybridMode && _lastActiveBusbar != null && _currentProject.DimensionMode != DimensionMode.Center)
+        {
+            // Hybrid mode: desiredLength is I/O display length, convert to center
+            // Use approximate endpoint to find the matching reference segment
+            Point2D approxEnd = new Point2D(
+                startPoint.X + desiredLength * Math.Cos(_pendingAngle),
+                startPoint.Y + desiredLength * Math.Sin(_pendingAngle)
+            );
+            centerLength = ConvertHybridIOToCenterLength(desiredLength, startPoint, approxEnd,
+                _lastActiveBusbar, _currentProject.MaterialSettings.Thickness, _currentProject.DimensionMode);
+        }
+        else
+        {
+            // Normal I/O mode: add corner adjustment to get center dimension
+            centerLength = desiredLength + adjustment;
+        }
 
         // Calculate the new end point with the center length from the adjusted start
         var pt = new Point2D(
@@ -2574,6 +2749,24 @@ public partial class MainWindow : Window
 
         // Automatically save or update the busbar after each segment
         SaveOrUpdateCurrentBusbar();
+
+        // Hybrid mode: update display to show I/O dimension (geometry stays center-based)
+        if (isHybridMode && _previewSnappedToReference && _lastActiveBusbar != null && _currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
+        {
+            var hybridStart = _currentPoints[_currentPoints.Count - 2];
+            var hybridEnd = _currentPoints[_currentPoints.Count - 1];
+            double? hybridLen = CalculateHybridIOLength(hybridStart, hybridEnd, _lastActiveBusbar,
+                _currentProject.MaterialSettings.Thickness, _currentProject.DimensionMode);
+
+            if (hybridLen.HasValue && _currentSegments.Count > 0)
+            {
+                _currentSegments[_currentSegments.Count - 1].Length = hybridLen.Value;
+                UpdateSegmentList();
+            }
+        }
+
+        // Track whether this point was snapped (controls hybrid vs normal I/O mode for next segment)
+        _previousPointWasSnapped = _previewSnappedToReference;
 
         // Reset waiting state for next segment
         _waitingForLengthInput = false;
@@ -2648,22 +2841,105 @@ public partial class MainWindow : Window
         // Need at least one point to use dynamic line snapping
         if (_currentPoints.Count == 0)
         {
-            // Check start point snapping first
-            Point2D? nearStartPt = FindNearestStartPoint(currentPt, 10.0);
-            if (nearStartPt != null)
+            // If offset line is active, snap to it first
+            if (_offsetSnapAnchor != null)
             {
-                snappedCursor = nearStartPt.Value;
-            }
-            // Then check reference line snapping (if not disabled)
-            else if (!_isSnappingDisabled && (_snapReferenceLine != null || _snapReferenceLineEnd != null))
-            {
-                Point2D? refSnappedPos = SnapToReferenceLine(currentPt);
-                if (refSnappedPos.HasValue)
+                bool shouldBreakSnap;
+                Point2D offsetSnappedPos = SnapToOffsetLine(currentPt, currentPt, out shouldBreakSnap);
+                if (shouldBreakSnap)
                 {
-                    double refSnapDistance = currentPt.DistanceTo(refSnappedPos.Value);
-                    if (refSnapDistance <= 10.0)
+                    _offsetSnapDisabledForPoint = _offsetSnapAnchor;
+                    HideOffsetLine();
+                    _offsetSnapDisabled = true;
+                }
+                else
+                {
+                    snappedCursor = offsetSnappedPos;
+                }
+            }
+            else
+            {
+                // Check start point snapping first
+                Point2D? nearStartPt = FindNearestStartPoint(currentPt, 10.0);
+                if (nearStartPt != null)
+                {
+                    snappedCursor = nearStartPt.Value;
+                }
+                // Then check reference line snapping (if not disabled)
+                else if (!_isSnappingDisabled && (_snapReferenceLine != null || _snapReferenceLineEnd != null))
+                {
+                    Point2D? refSnappedPos = SnapToReferenceLine(currentPt);
+                    if (refSnappedPos.HasValue)
                     {
-                        snappedCursor = refSnappedPos.Value;
+                        double refSnapDistance = currentPt.DistanceTo(refSnappedPos.Value);
+                        if (refSnapDistance <= 10.0)
+                        {
+                            snappedCursor = refSnappedPos.Value;
+                        }
+                    }
+                }
+
+                // Trigger offset line if hovering over start/end reference point
+                if (_offsetSnapAnchor == null && !_offsetSnapDisabled)
+                {
+                    bool isOnStartRef = false;
+                    bool isOnEndRef = false;
+
+                    foreach (var snapPoint in _snapReferencePoints)
+                    {
+                        double px = Canvas.GetLeft(snapPoint) + 1.5;
+                        double py = Canvas.GetTop(snapPoint) + 1.5;
+                        double dist = Math.Sqrt(Math.Pow(snappedCursor.X - px, 2) + Math.Pow(snappedCursor.Y - py, 2));
+                        if (dist < 2.0)
+                        {
+                            isOnStartRef = true;
+                            break;
+                        }
+                    }
+
+                    if (!isOnStartRef)
+                    {
+                        foreach (var snapPoint in _snapReferencePointsEnd)
+                        {
+                            double px = Canvas.GetLeft(snapPoint) + 1.5;
+                            double py = Canvas.GetTop(snapPoint) + 1.5;
+                            double dist = Math.Sqrt(Math.Pow(snappedCursor.X - px, 2) + Math.Pow(snappedCursor.Y - py, 2));
+                            if (dist < 2.0)
+                            {
+                                isOnEndRef = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (isOnStartRef || isOnEndRef)
+                    {
+                        var activeLayerOffset = _currentProject.GetActiveLayer();
+                        if (activeLayerOffset != null && activeLayerOffset.Busbars.Count > 0)
+                        {
+                            var targetBusbarOffset = _lastActiveBusbar ?? activeLayerOffset.Busbars[0];
+                            if (targetBusbarOffset.Segments.Count >= 1)
+                            {
+                                double segmentAngle;
+                                if (isOnStartRef)
+                                    segmentAngle = targetBusbarOffset.Segments[0].AngleRadians;
+                                else
+                                    segmentAngle = targetBusbarOffset.Segments[targetBusbarOffset.Segments.Count - 1].AngleRadians;
+
+                                ShowOffsetLine(snappedCursor, segmentAngle);
+                            }
+                        }
+                    }
+                }
+
+                // Reset offset disabled if moved to a different point
+                if (_offsetSnapDisabled && _offsetSnapDisabledForPoint != null)
+                {
+                    double distToDisabled = snappedCursor.DistanceTo(_offsetSnapDisabledForPoint.Value);
+                    if (distToDisabled > 5.0)
+                    {
+                        _offsetSnapDisabled = false;
+                        _offsetSnapDisabledForPoint = null;
                     }
                 }
             }
@@ -2689,7 +2965,7 @@ public partial class MainWindow : Window
         // Calculate preview measurements
         const double minLength = 50.0;  // Minimum segment length
 
-        // First, try dynamic line snapping if we have an active dynamic line
+        // Try snap priority: offset line → dynamic line → regular reference line
         bool isSnappedToReferenceLine = false;
         bool usedDynamicSnap = false;
 
@@ -2697,7 +2973,27 @@ public partial class MainWindow : Window
         // Always allow snapping when we have at least one point (drawing mode)
         if (!_isSnappingDisabled || _currentPoints.Count >= 1)
         {
-            if (_dynamicSnapAnchor != null)
+            // First, try offset line snapping if we have an active offset line
+            if (_offsetSnapAnchor != null)
+            {
+                bool shouldBreakSnap;
+                Point2D offsetSnappedPos = SnapToOffsetLine(currentPt, lastPoint, out shouldBreakSnap);
+
+                if (shouldBreakSnap)
+                {
+                    _offsetSnapDisabledForPoint = _offsetSnapAnchor;
+                    HideOffsetLine();
+                    _offsetSnapDisabled = true;
+                }
+                else
+                {
+                    snappedCursor = offsetSnappedPos;
+                    isSnappedToReferenceLine = true;
+                    usedDynamicSnap = true; // Reuse flag — offset line acts like dynamic snap for downstream logic
+                }
+            }
+            // Then try dynamic line snapping
+            else if (_dynamicSnapAnchor != null)
             {
                 // We have an active dynamic line, try to snap to it
                 // The angle stays locked from when it was created
@@ -2721,7 +3017,7 @@ public partial class MainWindow : Window
                 }
             }
 
-            // If not using dynamic snap, check regular reference line snapping
+            // If not using dynamic/offset snap, check regular reference line snapping
             if (!usedDynamicSnap && (_snapReferenceLine != null || _snapReferenceLineEnd != null || _snapReferenceLinesCorners.Count > 0))
             {
                 Point2D? refSnappedPos = SnapToReferenceLine(currentPt);
@@ -2798,8 +3094,8 @@ public partial class MainWindow : Window
                                     Point2D anchorPoint = _currentPoints[_currentPoints.Count - 1];
 
                                     // Pre-calculate anchor adjustment for I/O mode to ensure dynamic line is oriented correctly
-                                    // Skip if hybrid mode (first point was snapped - draw as center)
-                                    if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2)
+                                    // Skip in hybrid mode (previous point was snapped) - geometry stays center-based
+                                    if (!_previousPointWasSnapped && _currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2)
                                     {
                                         var prevPoint = _currentPoints[_currentPoints.Count - 2];
 
@@ -2919,11 +3215,81 @@ public partial class MainWindow : Window
                                     // The angle was calculated from the adjusted anchor, ensuring correct orientation
                                     // NOTE: ShowDynamicSnapLine internally calls HideDynamicSnapLine() which resets
                                     // _dynamicSnapCornerBendAngle, so we must set it AFTER ShowDynamicSnapLine.
+                                    // Mutual exclusion: hide offset line if active
+                                    HideOffsetLine();
+
                                     ShowDynamicSnapLine(snappedCursor, dynamicAngle, angleBetween);
                                     _dynamicSnapCornerBendAngle = cornerBendAngle;
                                 }
                             }
                         }
+                        }
+                    }
+
+                    // Reset offset snap disabled flag if we moved to a different reference point
+                    if (_offsetSnapDisabled && _offsetSnapDisabledForPoint != null)
+                    {
+                        double distToDisabledOffsetPoint = refSnappedPos.Value.DistanceTo(_offsetSnapDisabledForPoint.Value);
+                        if (distToDisabledOffsetPoint > 5.0)
+                        {
+                            _offsetSnapDisabled = false;
+                            _offsetSnapDisabledForPoint = null;
+                        }
+                    }
+
+                    // Check if we're on a start/end reference point → create offset line
+                    if (_offsetSnapAnchor == null && !_offsetSnapDisabled)
+                    {
+                        bool isOnStartRefLine = false;
+                        bool isOnEndRefLine = false;
+
+                        foreach (var snapPoint in _snapReferencePoints)
+                        {
+                            double px = Canvas.GetLeft(snapPoint) + 1.5;
+                            double py = Canvas.GetTop(snapPoint) + 1.5;
+                            double dist = Math.Sqrt(Math.Pow(snappedCursor.X - px, 2) + Math.Pow(snappedCursor.Y - py, 2));
+                            if (dist < 2.0)
+                            {
+                                isOnStartRefLine = true;
+                                break;
+                            }
+                        }
+
+                        if (!isOnStartRefLine)
+                        {
+                            foreach (var snapPoint in _snapReferencePointsEnd)
+                            {
+                                double px = Canvas.GetLeft(snapPoint) + 1.5;
+                                double py = Canvas.GetTop(snapPoint) + 1.5;
+                                double dist = Math.Sqrt(Math.Pow(snappedCursor.X - px, 2) + Math.Pow(snappedCursor.Y - py, 2));
+                                if (dist < 2.0)
+                                {
+                                    isOnEndRefLine = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (isOnStartRefLine || isOnEndRefLine)
+                        {
+                            var activeLayerOffset = _currentProject.GetActiveLayer();
+                            if (activeLayerOffset != null && activeLayerOffset.Busbars.Count > 0)
+                            {
+                                var targetBusbarOffset = _lastActiveBusbar ?? activeLayerOffset.Busbars[0];
+                                if (targetBusbarOffset.Segments.Count >= 1)
+                                {
+                                    double segmentAngle;
+                                    if (isOnStartRefLine)
+                                        segmentAngle = targetBusbarOffset.Segments[0].AngleRadians;
+                                    else
+                                        segmentAngle = targetBusbarOffset.Segments[targetBusbarOffset.Segments.Count - 1].AngleRadians;
+
+                                    // Mutual exclusion: hide dynamic snap line if active
+                                    HideDynamicSnapLine();
+
+                                    ShowOffsetLine(snappedCursor, segmentAngle);
+                                }
+                            }
                         }
                     }
                 }
@@ -3082,7 +3448,8 @@ public partial class MainWindow : Window
             }
         }
         // Free drawing (not snapped): handle I/O mode adjustment
-        else if (_currentProject.DimensionMode != DimensionMode.Center && !_previousPointWasSnapped && _currentPoints.Count >= 2 && !isSnappedToReferenceLine)
+        // Skip if previous point was snapped (hybrid mode keeps geometry center-based)
+        else if (!_previousPointWasSnapped && _currentProject.DimensionMode != DimensionMode.Center && _currentPoints.Count >= 2 && !isSnappedToReferenceLine)
         {
             // Cursor is at corner position - we need to convert to center for angle calculation
             // First, get preliminary angle from center to corner
@@ -3324,6 +3691,9 @@ public partial class MainWindow : Window
         }
 
         UpdateLivePreviewMeasurements(adjustedLastPoint, endPoint, hybridIOLength, displayAdjustment);
+
+        // Save snap state for the DataGrid commit path (which bypasses click handler snap detection)
+        _previewSnappedToReference = isSnappedToReferenceLine;
 
         // After first point is placed, start/restart timer to detect when mouse stops
         if (_currentPoints.Count >= 1)
@@ -4380,6 +4750,88 @@ public partial class MainWindow : Window
         _dynamicSnapCornerBendAngle = 0;
     }
 
+    private void ShowOffsetLine(Point2D anchorPoint, double angleRadians)
+    {
+        // Remove existing offset line if any
+        HideOffsetLine();
+
+        // Store the anchor point and angle
+        _offsetSnapAnchor = anchorPoint;
+        _offsetSnapAngle = angleRadians;
+
+        // Calculate direction vector
+        double cos = Math.Cos(angleRadians);
+        double sin = Math.Sin(angleRadians);
+
+        // Fixed 10mm interval, ±10 points (21 total), ±100mm range
+        const double snapInterval = 10.0;
+        const int numPointsPerSide = 10;
+        double extension = numPointsPerSide * snapInterval; // 100mm
+
+        Point2D lineStart = new Point2D(
+            anchorPoint.X - extension * cos,
+            anchorPoint.Y - extension * sin
+        );
+        Point2D lineEnd = new Point2D(
+            anchorPoint.X + extension * cos,
+            anchorPoint.Y + extension * sin
+        );
+
+        // Create the green offset line
+        _offsetLine = new Line
+        {
+            X1 = lineStart.X,
+            Y1 = lineStart.Y,
+            X2 = lineEnd.X,
+            Y2 = lineEnd.Y,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 245, 200)), // Light green
+            StrokeThickness = 1.5,
+            IsHitTestVisible = false
+        };
+        drawingCanvas.Children.Add(_offsetLine);
+
+        // Create snap points at 10mm intervals (±10 points = 21 total)
+        for (int i = -numPointsPerSide; i <= numPointsPerSide; i++)
+        {
+            double distance = i * snapInterval;
+            Point2D snapDot = new Point2D(
+                anchorPoint.X + distance * cos,
+                anchorPoint.Y + distance * sin
+            );
+
+            var dot = new Ellipse
+            {
+                Width = 3,
+                Height = 3,
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(160, 200, 160)), // Darker green
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(dot, snapDot.X - 1.5);
+            Canvas.SetTop(dot, snapDot.Y - 1.5);
+            drawingCanvas.Children.Add(dot);
+            _offsetSnapPoints.Add(dot);
+        }
+    }
+
+    private void HideOffsetLine()
+    {
+        if (_offsetLine != null)
+        {
+            drawingCanvas.Children.Remove(_offsetLine);
+            _offsetLine = null;
+        }
+
+        foreach (var point in _offsetSnapPoints)
+        {
+            drawingCanvas.Children.Remove(point);
+        }
+        _offsetSnapPoints.Clear();
+
+        // Clear the locked anchor point and angle
+        _offsetSnapAnchor = null;
+        _offsetSnapAngle = 0;
+    }
+
     private void UpdateReferenceLineVisibility(Point2D cursorPos)
     {
         // If no reference lines exist, nothing to do
@@ -4738,6 +5190,56 @@ public partial class MainWindow : Window
         return snappedPoint;
     }
 
+    private Point2D SnapToOffsetLine(Point2D clickPoint, Point2D lastPoint, out bool shouldBreakSnap)
+    {
+        shouldBreakSnap = false;
+
+        if (_offsetSnapAnchor == null)
+            return clickPoint;
+
+        Point2D anchorPoint = _offsetSnapAnchor.Value;
+        double lineAngle = _offsetSnapAngle;
+
+        double cos = Math.Cos(lineAngle);
+        double sin = Math.Sin(lineAngle);
+
+        // Vector from anchor to cursor
+        double vx = clickPoint.X - anchorPoint.X;
+        double vy = clickPoint.Y - anchorPoint.Y;
+
+        // Distance along the line (parallel)
+        double distanceAlongLine = vx * cos + vy * sin;
+
+        // Distance perpendicular to the line
+        double perpDistance = Math.Abs(vx * (-sin) + vy * cos);
+
+        const double snapTolerance = 10.0;
+        if (perpDistance > snapTolerance)
+        {
+            shouldBreakSnap = true;
+            return clickPoint;
+        }
+
+        // Snap to nearest 10mm interval
+        const double snapInterval = 10.0;
+        double snappedDistance = Math.Round(distanceAlongLine / snapInterval) * snapInterval;
+
+        // Break if more than 10 steps from anchor
+        int snapCount = (int)Math.Abs(Math.Round(snappedDistance / snapInterval));
+        if (snapCount > 10)
+        {
+            shouldBreakSnap = true;
+            return clickPoint;
+        }
+
+        Point2D snappedPoint = new Point2D(
+            anchorPoint.X + snappedDistance * cos,
+            anchorPoint.Y + snappedDistance * sin
+        );
+
+        return snappedPoint;
+    }
+
     private void DrawPreviewArc(Point2D p1, Point2D p2, Point2D p3, double radius)
     {
         // Draw a preview arc at the bend point (same as DrawBendArc but stores in _previewArc)
@@ -5050,8 +5552,20 @@ public partial class MainWindow : Window
             ExitStartPointMode();
             e.Handled = true;
         }
-        else if (e.Key == Key.D && !_isDrawing && !_isStartPointMode)
+        else if (e.Key == Key.D && !_isStartPointMode)
         {
+            if (_isDrawing)
+            {
+                // Finish current drawing first (same as pressing Escape then D)
+                if (_isEditingLength)
+                {
+                    dgSegments.CancelEdit();
+                    _isEditingLength = false;
+                }
+                _waitingForLengthInput = false;
+                _mouseStopTimer?.Stop();
+                FinishDrawing();
+            }
             StartDrawing();
             e.Handled = true;
         }
