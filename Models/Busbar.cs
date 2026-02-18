@@ -17,6 +17,11 @@ namespace BusbarCAD.Models
         public Line? StartMarker { get; set; } = null;
         public Line? EndMarker { get; set; } = null;
 
+        // Linked busbar properties
+        public Busbar? LinkedTo { get; set; } = null;
+        public List<int> LinkedSegmentOffsets { get; set; } = new List<int>(); // Per-segment offset (signed, in busbar-thickness steps)
+        public bool IsLinked => LinkedTo != null;
+
         public Busbar(string name)
         {
             Name = name;

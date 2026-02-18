@@ -136,6 +136,33 @@ public partial class MainWindow : Window
     private bool _isDraggingMoveControls = false;
     private System.Windows.Point _dragStartPoint;
 
+    // ===== LINKED BUSBAR MODE =====
+    private bool _isLinkedBusbarMode = false;
+    private bool _isLinkedEditMode = false; // true when editing existing links (vs creating new)
+    private Busbar? _linkedReference = null;
+    private List<LinkedBusbarPreview> _linkedPreviews = new List<LinkedBusbarPreview>();
+    private Dictionary<LinkedBusbarPreview, Busbar> _linkedEditMap = new(); // preview → existing busbar (edit mode only)
+    private LinkedBusbarPreview? _hoveredPreview = null;
+    private int _hoveredSegmentIndex = -1;
+
+    // Reference geometry (computed once on mode entry)
+    // Start/end ref line: signed index -> position (10mm perpendicular intervals)
+    private Dictionary<int, Point2D> _refStartPoints = new();
+    private Dictionary<int, Point2D> _refEndPoints = new();
+    // Per-segment: direction vector and perpendicular vector (for offset line intersection math)
+    private List<Point2D> _refSegDirections = new();  // unit direction of each reference segment
+    private List<Point2D> _refSegPerps = new();       // unit perpendicular of each reference segment
+    private List<Point2D> _refSegStarts = new();      // start point of each reference segment
+    private int _refMaxIndex = 0;
+
+    private class LinkedBusbarPreview
+    {
+        public List<int> SegmentOffsets { get; set; } = new(); // One offset per segment (signed, in thickness steps)
+        public List<Point2D> JointPositions { get; set; } = new(); // [start, corner1, ..., cornerN, end]
+        public List<UIElement> PreviewVisuals { get; set; } = new();
+        public bool IsActive { get; set; } = true;
+    }
+
     // Start Point Mode
     private bool _isStartPointMode = false;
     private Point2D? _startPointAnchor = null;
@@ -250,7 +277,8 @@ public partial class MainWindow : Window
         {
             foreach (var busbar in activeLayer.Busbars)
             {
-                lstBusbars.Items.Add($"{busbar.Name} - {busbar.Segments.Count} segments");
+                string linked = busbar.IsLinked ? " (linked)" : "";
+                lstBusbars.Items.Add($"{busbar.Name} - {busbar.Segments.Count} segments{linked}");
             }
         }
     }
@@ -493,9 +521,11 @@ public partial class MainWindow : Window
         var currentLayer = _currentProject.GetActiveLayer();
         if (currentLayer == null) return;
 
-        // Draw small circles at all busbar points
+        // Draw small circles at all busbar points (skip linked busbars — they follow their reference)
         foreach (var busbar in currentLayer.Busbars)
         {
+            if (busbar.IsLinked) continue;
+
             for (int i = 0; i <= busbar.Segments.Count; i++)
             {
                 var point = GetBusbarPoint(busbar, i);
@@ -751,6 +781,12 @@ public partial class MainWindow : Window
             _busbarRenderer?.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
         }
 
+        // Update linked busbars for preview
+        foreach (var busbar in affectedBusbars)
+        {
+            UpdateLinkedBusbars(busbar);
+        }
+
         // Update DataGrid if a busbar is selected
         if (lstBusbars.SelectedIndex >= 0 && lstBusbars.SelectedItem is Busbar selectedBusbar)
         {
@@ -808,6 +844,12 @@ public partial class MainWindow : Window
         if (activeLayer != null)
         {
             _busbarRenderer?.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
+        }
+
+        // Update linked busbars for all affected reference busbars
+        foreach (var busbar in affectedBusbars)
+        {
+            UpdateLinkedBusbars(busbar);
         }
 
         ClearPointSelection();
@@ -897,6 +939,13 @@ public partial class MainWindow : Window
                 _busbarRenderer?.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
             }
 
+            // Update linked busbars back to original positions
+            var restoredBusbars = _originalPointPositions.Keys.Select(k => k.Item1).Distinct().ToList();
+            foreach (var busbar in restoredBusbars)
+            {
+                UpdateLinkedBusbars(busbar);
+            }
+
             // Update DataGrid if needed
             if (lstBusbars.SelectedIndex >= 0 && lstBusbars.SelectedItem is Busbar selectedBusbar)
             {
@@ -976,13 +1025,15 @@ public partial class MainWindow : Window
         var currentLayer = _currentProject.GetActiveLayer();
         if (currentLayer == null) return;
 
-        // Find nearest busbar point
+        // Find nearest busbar point (skip linked busbars — they follow their reference)
         Busbar? nearestBusbar = null;
         int nearestPointIndex = -1;
         double nearestBusbarDist = selectionRadius;
 
         foreach (var busbar in currentLayer.Busbars)
         {
+            if (busbar.IsLinked) continue;
+
             for (int i = 0; i <= busbar.Segments.Count; i++)
             {
                 var point = GetBusbarPoint(busbar, i);
@@ -1193,8 +1244,9 @@ public partial class MainWindow : Window
 
     private void StartDrawing()
     {
-        // Exit start point mode if active
+        // Exit other modes if active
         if (_isStartPointMode) ExitStartPointMode();
+        if (_isLinkedBusbarMode) ExitLinkedBusbarMode();
 
         _isDrawing = true;
         _currentPoints.Clear();
@@ -1826,6 +1878,13 @@ public partial class MainWindow : Window
     // Canvas Event Handlers
     private void Canvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        // Handle Linked Busbar mode
+        if (_isLinkedBusbarMode)
+        {
+            HandleLinkedBusbarLeftClick(e);
+            return;
+        }
+
         // Handle Start Point mode
         if (_isStartPointMode)
         {
@@ -2788,6 +2847,13 @@ public partial class MainWindow : Window
 
             _lastPanPoint = currentPoint;
             e.Handled = true;
+            return;
+        }
+
+        // Handle Linked Busbar mode hover
+        if (_isLinkedBusbarMode)
+        {
+            HandleLinkedBusbarHover(e);
             return;
         }
 
@@ -3818,6 +3884,12 @@ public partial class MainWindow : Window
 
     private void Canvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (_isLinkedBusbarMode)
+        {
+            HandleLinkedBusbarRightClick(e);
+            return;
+        }
+
         if (_isStartPointMode)
         {
             ExitStartPointMode();
@@ -5547,12 +5619,30 @@ public partial class MainWindow : Window
             }
         }
 
-        if (e.Key == Key.Escape && _isStartPointMode)
+        if (e.Key == Key.Escape && _isLinkedBusbarMode)
+        {
+            CancelLinkedBusbars();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Enter && _isLinkedBusbarMode)
+        {
+            ConfirmLinkedBusbars();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.L && !_isDrawing && !_isMovePointsMode && !_isStartPointMode)
+        {
+            if (_isLinkedBusbarMode)
+                CancelLinkedBusbars();
+            else
+                StartLinkedBusbarMode();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && _isStartPointMode)
         {
             ExitStartPointMode();
             e.Handled = true;
         }
-        else if (e.Key == Key.D && !_isStartPointMode)
+        else if (e.Key == Key.D && !_isStartPointMode && !_isLinkedBusbarMode)
         {
             if (_isDrawing)
             {
@@ -5569,12 +5659,12 @@ public partial class MainWindow : Window
             StartDrawing();
             e.Handled = true;
         }
-        else if (e.Key == Key.M && !_isDrawing && !_isStartPointMode)
+        else if (e.Key == Key.M && !_isDrawing && !_isStartPointMode && !_isLinkedBusbarMode)
         {
             MovePoints_Click(this, new RoutedEventArgs());
             e.Handled = true;
         }
-        else if (e.Key == Key.S && !_isDrawing && !_isMovePointsMode)
+        else if (e.Key == Key.S && !_isDrawing && !_isMovePointsMode && !_isLinkedBusbarMode)
         {
             StartPoints_Click(this, new RoutedEventArgs());
             e.Handled = true;
@@ -5821,6 +5911,38 @@ public partial class MainWindow : Window
 
             // Get the selected busbar from the model (single source of truth)
             var selectedBusbar = activeLayer.Busbars[lstBusbars.SelectedIndex];
+
+            // If linked, offer options: Edit Link / Unlink / Cancel
+            if (selectedBusbar.IsLinked)
+            {
+                var result = MessageBox.Show(
+                    "This is a linked busbar.\n\nYes = Edit linked busbars\nNo = Unlink (make independent)\nCancel = Close",
+                    "Linked Busbar",
+                    MessageBoxButton.YesNoCancel,
+                    MessageBoxImage.Question);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    // Edit Link: enter linked busbar mode with existing linked busbars as previews
+                    lstBusbars.SelectedIndex = -1;
+                    EditLinkedBusbars(selectedBusbar.LinkedTo!);
+                    return;
+                }
+                else if (result == MessageBoxResult.No)
+                {
+                    selectedBusbar.LinkedTo = null;
+                    selectedBusbar.LinkedSegmentOffsets.Clear();
+                    RefreshBusbarList();
+                    lstBusbars.SelectedIndex = activeLayer.Busbars.IndexOf(selectedBusbar);
+                }
+                else
+                {
+                    // Cancel — deselect, linked busbars can only be edited via their reference
+                    lstBusbars.SelectedIndex = -1;
+                    return;
+                }
+            }
+
             _lastActiveBusbar = selectedBusbar;
 
             // Highlight the selected busbar (make start/end markers thicker)
@@ -5893,6 +6015,14 @@ public partial class MainWindow : Window
         }
 
         var busbar = activeLayer.Busbars[selectedBusbarIndex];
+
+        // Linked busbars cannot be edited directly — edit the reference busbar instead
+        if (busbar.IsLinked)
+        {
+            e.Cancel = true;
+            UpdateStatusBar("Linked busbars can only be edited by editing their reference busbar.");
+            return;
+        }
 
         // Get the segment index from the row index instead of trying to find the item
         // This avoids issues when the DataGrid is refreshed
@@ -6049,6 +6179,9 @@ public partial class MainWindow : Window
         {
             _busbarRenderer.RedrawAllBusbars(activeLayer, _lastActiveBusbar, _currentProject.DimensionMode);
         }
+
+        // Update any linked busbars that reference this one
+        UpdateLinkedBusbars(busbar);
     }
 
     // ==================== Start Point Mode ====================
@@ -6375,5 +6508,844 @@ public partial class MainWindow : Window
         }
 
         return nearest;
+    }
+
+    // ===== LINKED BUSBAR MODE =====
+
+    private void LinkedBusbar_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isLinkedBusbarMode)
+            CancelLinkedBusbars();
+        else
+            StartLinkedBusbarMode();
+    }
+
+    private void StartLinkedBusbarMode()
+    {
+        // Exit other modes
+        if (_isDrawing)
+        {
+            _waitingForLengthInput = false;
+            _mouseStopTimer?.Stop();
+            FinishDrawing();
+        }
+        if (_isMovePointsMode) MovePoints_Click(this, new RoutedEventArgs());
+        if (_isStartPointMode) ExitStartPointMode();
+
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null || activeLayer.Busbars.Count == 0)
+        {
+            UpdateStatusBar("No busbars to link to. Draw a reference busbar first.");
+            return;
+        }
+
+        var targetBusbar = _lastActiveBusbar ?? activeLayer.Busbars[activeLayer.Busbars.Count - 1];
+        if (targetBusbar.Segments.Count == 0)
+        {
+            UpdateStatusBar("Reference busbar has no segments.");
+            return;
+        }
+
+        _isLinkedBusbarMode = true;
+        _linkedReference = targetBusbar;
+        _linkedPreviews.Clear();
+        _hoveredPreview = null;
+        _hoveredSegmentIndex = -1;
+
+        // Compute reference geometry
+        ComputeLinkedReferenceGeometry();
+
+        // Show only start reference line
+        ShowSnapReferenceLineStartOnly();
+
+        btnLinkedBusbar.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 200));
+        canvasContainer.Focus();
+        UpdateStatusBar("Linked Busbar: Click start ref line snap points. Right/Left click segments to adjust. Enter=confirm, Esc=cancel.");
+    }
+
+    private void EditLinkedBusbars(Busbar reference)
+    {
+        // Exit other modes
+        if (_isDrawing)
+        {
+            _waitingForLengthInput = false;
+            _mouseStopTimer?.Stop();
+            FinishDrawing();
+        }
+        if (_isMovePointsMode) MovePoints_Click(this, new RoutedEventArgs());
+        if (_isStartPointMode) ExitStartPointMode();
+
+        if (reference.Segments.Count == 0)
+        {
+            UpdateStatusBar("Reference busbar has no segments.");
+            return;
+        }
+
+        _isLinkedBusbarMode = true;
+        _isLinkedEditMode = true;
+        _linkedReference = reference;
+        _linkedPreviews.Clear();
+        _linkedEditMap.Clear();
+        _hoveredPreview = null;
+        _hoveredSegmentIndex = -1;
+
+        // Compute reference geometry
+        ComputeLinkedReferenceGeometry();
+
+        // Load all existing linked busbars as previews
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer != null)
+        {
+            foreach (var busbar in activeLayer.Busbars)
+            {
+                if (busbar.LinkedTo != reference) continue;
+
+                var preview = new LinkedBusbarPreview
+                {
+                    SegmentOffsets = new List<int>(busbar.LinkedSegmentOffsets),
+                    IsActive = true
+                };
+                CalculateLinkedBusbarGeometry(preview);
+                RenderLinkedPreview(preview);
+                _linkedPreviews.Add(preview);
+                _linkedEditMap[preview] = busbar;
+
+                // Hide the real busbar visuals while editing
+                if (_busbarRenderer != null)
+                    _busbarRenderer.ClearBusbarVisuals(busbar);
+            }
+        }
+
+        ShowSnapReferenceLineStartOnly();
+        btnLinkedBusbar.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 200));
+        canvasContainer.Focus();
+        UpdateStatusBar("Edit Linked Busbars: Right/Left click segments to adjust. Click ref line to add/remove. Enter=confirm, Esc=cancel.");
+    }
+
+    private void ExitLinkedBusbarMode()
+    {
+        _isLinkedBusbarMode = false;
+        _isLinkedEditMode = false;
+        _linkedReference = null;
+        _hoveredPreview = null;
+        _hoveredSegmentIndex = -1;
+        _linkedEditMap.Clear();
+
+        foreach (var preview in _linkedPreviews)
+        {
+            foreach (var visual in preview.PreviewVisuals)
+                drawingCanvas.Children.Remove(visual);
+        }
+        _linkedPreviews.Clear();
+
+        HideLinkedStartReferenceLine();
+
+        _refStartPoints.Clear();
+        _refEndPoints.Clear();
+        _refSegDirections.Clear();
+        _refSegPerps.Clear();
+        _refSegStarts.Clear();
+
+        btnLinkedBusbar.Background = System.Windows.Media.Brushes.Transparent;
+        UpdateStatusBar("Ready");
+    }
+
+    // Storage for linked mode start reference line visuals
+    private Line? _linkedStartRefLine = null;
+    private List<Ellipse> _linkedStartRefPoints = new List<Ellipse>();
+
+    private void ShowSnapReferenceLineStartOnly()
+    {
+        HideLinkedStartReferenceLine();
+        if (_linkedReference == null || _linkedReference.Segments.Count == 0) return;
+
+        var firstSegment = _linkedReference.Segments[0];
+        Point2D startPoint = firstSegment.StartPoint;
+
+        double dx = firstSegment.EndPoint.X - firstSegment.StartPoint.X;
+        double dy = firstSegment.EndPoint.Y - firstSegment.StartPoint.Y;
+        double perpAngle = Math.Atan2(dy, dx) + Math.PI / 2.0;
+
+        double cos = Math.Cos(perpAngle);
+        double sin = Math.Sin(perpAngle);
+        double extension = _refMaxIndex * 10.0;
+
+        _linkedStartRefLine = new Line
+        {
+            X1 = startPoint.X - extension * cos,
+            Y1 = startPoint.Y - extension * sin,
+            X2 = startPoint.X + extension * cos,
+            Y2 = startPoint.Y + extension * sin,
+            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(180, 220, 255)),
+            StrokeThickness = 1.5,
+            IsHitTestVisible = false
+        };
+        drawingCanvas.Children.Add(_linkedStartRefLine);
+
+        foreach (var kvp in _refStartPoints)
+        {
+            var pos = kvp.Value;
+            bool isCenter = kvp.Key == 0;
+            var snapDot = new Ellipse
+            {
+                Width = isCenter ? 5 : 3,
+                Height = isCenter ? 5 : 3,
+                Fill = isCenter
+                    ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(100, 150, 255))
+                    : new SolidColorBrush(System.Windows.Media.Color.FromRgb(150, 190, 230)),
+                IsHitTestVisible = false
+            };
+            double r = isCenter ? 2.5 : 1.5;
+            Canvas.SetLeft(snapDot, pos.X - r);
+            Canvas.SetTop(snapDot, pos.Y - r);
+            drawingCanvas.Children.Add(snapDot);
+            _linkedStartRefPoints.Add(snapDot);
+        }
+    }
+
+    private void HideLinkedStartReferenceLine()
+    {
+        if (_linkedStartRefLine != null)
+        {
+            drawingCanvas.Children.Remove(_linkedStartRefLine);
+            _linkedStartRefLine = null;
+        }
+        foreach (var pt in _linkedStartRefPoints)
+            drawingCanvas.Children.Remove(pt);
+        _linkedStartRefPoints.Clear();
+    }
+
+    /// <summary>
+    /// Compute per-segment direction/perpendicular vectors and start/end reference line positions.
+    /// Corner positions are computed on-the-fly as intersections of adjacent offset lines.
+    /// </summary>
+    private void ComputeLinkedReferenceGeometry()
+    {
+        _refStartPoints.Clear();
+        _refEndPoints.Clear();
+        _refSegDirections.Clear();
+        _refSegPerps.Clear();
+        _refSegStarts.Clear();
+
+        if (_linkedReference == null || _linkedReference.Segments.Count == 0) return;
+
+        const double snapInterval = 10.0;
+        const int numPointsPerSide = 5;
+        _refMaxIndex = numPointsPerSide;
+
+        // Store per-segment direction and perpendicular unit vectors
+        foreach (var seg in _linkedReference.Segments)
+        {
+            double dx = seg.EndPoint.X - seg.StartPoint.X;
+            double dy = seg.EndPoint.Y - seg.StartPoint.Y;
+            double len = Math.Sqrt(dx * dx + dy * dy);
+            if (len < 0.0001) len = 0.0001;
+
+            Point2D dir = new Point2D(dx / len, dy / len);
+            Point2D perp = new Point2D(-dir.Y, dir.X); // 90° CCW rotation = "left" side
+
+            _refSegDirections.Add(dir);
+            _refSegPerps.Add(perp);
+            _refSegStarts.Add(seg.StartPoint);
+        }
+
+        // Start reference line (perpendicular to first segment at its start point)
+        var firstPerp = _refSegPerps[0];
+        var startPt = _linkedReference.Segments[0].StartPoint;
+        for (int i = -numPointsPerSide; i <= numPointsPerSide; i++)
+        {
+            double t = i * snapInterval;
+            _refStartPoints[i] = new Point2D(
+                startPt.X + t * firstPerp.X,
+                startPt.Y + t * firstPerp.Y
+            );
+        }
+
+        // End reference line (perpendicular to last segment at its end point)
+        var lastPerp = _refSegPerps[_refSegPerps.Count - 1];
+        var endPt = _linkedReference.Segments[_linkedReference.Segments.Count - 1].EndPoint;
+        for (int i = -numPointsPerSide; i <= numPointsPerSide; i++)
+        {
+            double t = i * snapInterval;
+            _refEndPoints[i] = new Point2D(
+                endPt.X + t * lastPerp.X,
+                endPt.Y + t * lastPerp.Y
+            );
+        }
+    }
+
+    /// <summary>
+    /// Compute corner position as intersection of two adjacent offset segment lines.
+    /// Segment i has offset N1 (perpendicular steps), segment i+1 has offset N2.
+    /// Corner = intersection of (ref_line_i + N1*thickness*perp_i) and (ref_line_{i+1} + N2*thickness*perp_{i+1}).
+    /// </summary>
+    private Point2D ComputeCornerFromOffsets(int cornerIndex, int offsetPrev, int offsetNext)
+    {
+        if (_linkedReference == null) return new Point2D(0, 0);
+
+        const double thickness = 10.0;
+        int segPrev = cornerIndex;      // segment before the corner
+        int segNext = cornerIndex + 1;  // segment after the corner
+
+        // Reference corner point (end of segment segPrev = start of segment segNext)
+        Point2D refCorner = _linkedReference.Segments[segPrev].EndPoint;
+
+        Point2D perpPrev = _refSegPerps[segPrev];
+        Point2D perpNext = _refSegPerps[segNext];
+        Point2D dirPrev = _refSegDirections[segPrev];
+        Point2D dirNext = _refSegDirections[segNext];
+
+        // Offset lines:
+        // Line 1: refCorner + offsetPrev*thickness*perpPrev + s*dirPrev (parametric in s)
+        // Line 2: refCorner + offsetNext*thickness*perpNext + t*dirNext (parametric in t)
+        //
+        // We need to find the point on Line 1 that also lies on Line 2.
+        // (refCorner + oP*t*pP + s*dP) must have perpendicular distance from ref_line_next = oN*t
+        // Simpler: find s such that the point is on offset line 2.
+        //
+        // Point on offset line 1: P = refCorner + oP*pP + s*dP
+        // For P to be on offset line 2: (P - refCorner) . perpNext = oN*thickness
+        // (oP*thickness*pP + s*dP) . pN = oN*thickness
+        // oP*thickness*(pP.pN) + s*(dP.pN) = oN*thickness
+        // s = (oN*thickness - oP*thickness*(pP.pN)) / (dP.pN)
+
+        double pPdotpN = perpPrev.X * perpNext.X + perpPrev.Y * perpNext.Y;
+        double dPdotpN = dirPrev.X * perpNext.X + dirPrev.Y * perpNext.Y;
+
+        double oP = offsetPrev * thickness;
+        double oN = offsetNext * thickness;
+
+        if (Math.Abs(dPdotpN) < 0.0001)
+        {
+            // Segments are parallel — just offset uniformly
+            return new Point2D(
+                refCorner.X + oP * perpPrev.X,
+                refCorner.Y + oP * perpPrev.Y
+            );
+        }
+
+        double s = (oN - oP * pPdotpN) / dPdotpN;
+
+        return new Point2D(
+            refCorner.X + oP * perpPrev.X + s * dirPrev.X,
+            refCorner.Y + oP * perpPrev.Y + s * dirPrev.Y
+        );
+    }
+
+    private void CalculateLinkedBusbarGeometry(LinkedBusbarPreview preview)
+    {
+        if (_linkedReference == null) return;
+
+        preview.JointPositions.Clear();
+
+        int numSegments = _linkedReference.Segments.Count;
+        if (preview.SegmentOffsets.Count != numSegments) return;
+
+        // Start position from start ref points
+        int startOff = preview.SegmentOffsets[0];
+        if (_refStartPoints.ContainsKey(startOff))
+            preview.JointPositions.Add(_refStartPoints[startOff]);
+        else
+            return;
+
+        // Corner positions: intersection of adjacent offset segment lines
+        for (int c = 0; c < numSegments - 1; c++)
+        {
+            int offPrev = preview.SegmentOffsets[c];
+            int offNext = preview.SegmentOffsets[c + 1];
+            preview.JointPositions.Add(ComputeCornerFromOffsets(c, offPrev, offNext));
+        }
+
+        // End position from end ref points
+        int endOff = preview.SegmentOffsets[numSegments - 1];
+        if (_refEndPoints.ContainsKey(endOff))
+            preview.JointPositions.Add(_refEndPoints[endOff]);
+        else
+            return;
+    }
+
+    private void RenderLinkedPreview(LinkedBusbarPreview preview)
+    {
+        foreach (var visual in preview.PreviewVisuals)
+            drawingCanvas.Children.Remove(visual);
+        preview.PreviewVisuals.Clear();
+
+        if (!preview.IsActive || preview.JointPositions.Count < 2) return;
+
+        // Draw segments as dashed lines
+        for (int i = 0; i < preview.JointPositions.Count - 1; i++)
+        {
+            var p1 = preview.JointPositions[i];
+            var p2 = preview.JointPositions[i + 1];
+            bool isHovered = (preview == _hoveredPreview && i == _hoveredSegmentIndex);
+
+            var line = new Line
+            {
+                X1 = p1.X, Y1 = p1.Y,
+                X2 = p2.X, Y2 = p2.Y,
+                Stroke = isHovered
+                    ? new SolidColorBrush(System.Windows.Media.Color.FromRgb(255, 165, 0))
+                    : new SolidColorBrush(System.Windows.Media.Color.FromRgb(100, 180, 255)),
+                StrokeThickness = isHovered ? 2.5 : 1.5,
+                StrokeDashArray = new DoubleCollection(new[] { 4.0, 2.0 }),
+                IsHitTestVisible = false
+            };
+            drawingCanvas.Children.Add(line);
+            preview.PreviewVisuals.Add(line);
+        }
+
+        // Draw joint dots
+        foreach (var pt in preview.JointPositions)
+        {
+            var dot = new Ellipse
+            {
+                Width = 4, Height = 4,
+                Fill = new SolidColorBrush(System.Windows.Media.Color.FromRgb(100, 180, 255)),
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(dot, pt.X - 2);
+            Canvas.SetTop(dot, pt.Y - 2);
+            drawingCanvas.Children.Add(dot);
+            preview.PreviewVisuals.Add(dot);
+        }
+    }
+
+    private void HandleLinkedBusbarLeftClick(System.Windows.Input.MouseButtonEventArgs e)
+    {
+        var clickPos = GetCanvasMousePosition(e);
+
+        // If hovering over a segment, decrease its offset
+        if (_hoveredPreview != null && _hoveredSegmentIndex >= 0)
+        {
+            AdjustLinkedSegment(_hoveredPreview, _hoveredSegmentIndex, decrease: true);
+            return;
+        }
+
+        // Otherwise, try to click a start ref snap point
+        int? nearestIndex = FindNearestStartRefIndex(clickPos, 10.0);
+        if (nearestIndex == null || nearestIndex.Value == 0) return;
+
+        int idx = nearestIndex.Value;
+
+        // Check if preview already exists with all offsets == idx (uniform at this index)
+        var existing = _linkedPreviews.Find(p => p.SegmentOffsets.Count > 0 && p.SegmentOffsets[0] == idx);
+        if (existing != null)
+        {
+            existing.IsActive = !existing.IsActive;
+            if (!existing.IsActive)
+            {
+                foreach (var v in existing.PreviewVisuals)
+                    drawingCanvas.Children.Remove(v);
+                existing.PreviewVisuals.Clear();
+            }
+            else
+            {
+                CalculateLinkedBusbarGeometry(existing);
+                RenderLinkedPreview(existing);
+            }
+            return;
+        }
+
+        // Create new preview — all segments at uniform offset idx
+        int numSegments = _linkedReference!.Segments.Count;
+        var preview = new LinkedBusbarPreview
+        {
+            SegmentOffsets = new List<int>(new int[numSegments])
+        };
+        for (int s = 0; s < numSegments; s++)
+            preview.SegmentOffsets[s] = idx;
+
+        CalculateLinkedBusbarGeometry(preview);
+        RenderLinkedPreview(preview);
+        _linkedPreviews.Add(preview);
+
+        UpdateStatusBar($"Linked preview at offset {idx}. Right-click segment to increase, left-click to decrease.");
+    }
+
+    private void HandleLinkedBusbarRightClick(System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (_hoveredPreview != null && _hoveredSegmentIndex >= 0)
+            AdjustLinkedSegment(_hoveredPreview, _hoveredSegmentIndex, decrease: false);
+    }
+
+    /// <summary>
+    /// Check if a segment offset value is already used by another active preview at the given segment index.
+    /// Also checks index 0 which is reserved for the reference busbar.
+    /// </summary>
+    private bool IsSegmentOffsetOccupied(int segmentIndex, int offsetValue, LinkedBusbarPreview? exclude)
+    {
+        // Index 0 = reference busbar, always occupied
+        if (offsetValue == 0) return true;
+
+        foreach (var p in _linkedPreviews)
+        {
+            if (p == exclude || !p.IsActive) continue;
+            if (segmentIndex < p.SegmentOffsets.Count && p.SegmentOffsets[segmentIndex] == offsetValue)
+                return true;
+        }
+        return false;
+    }
+
+    private void AdjustLinkedSegment(LinkedBusbarPreview preview, int segmentIndex, bool decrease)
+    {
+        if (_linkedReference == null) return;
+        if (segmentIndex < 0 || segmentIndex >= preview.SegmentOffsets.Count) return;
+
+        int currentValue = preview.SegmentOffsets[segmentIndex];
+
+        // Determine delta: decrease = toward reference, increase = away from reference
+        int delta;
+        if (currentValue > 0)
+            delta = decrease ? -1 : 1;
+        else if (currentValue < 0)
+            delta = decrease ? 1 : -1;
+        else
+            return; // At reference position, can't adjust
+
+        int newValue = currentValue + delta;
+
+        // Never cross zero or change sign — stay on your side
+        if (Math.Sign(newValue) != Math.Sign(currentValue))
+            return;
+
+        // Clamp to valid range
+        if (Math.Abs(newValue) > _refMaxIndex)
+            return;
+
+        bool movingOutward = Math.Abs(newValue) > Math.Abs(currentValue);
+
+        if (movingOutward)
+        {
+            // Moving away from reference: cascade-push only the directly blocking preview
+            // E.g. 1→2 pushes 2→3, and if 3 is occupied pushes 3→4, but 1→2 does NOT push 4
+            int checkIndex = newValue;
+            var pushChain = new List<(LinkedBusbarPreview p, int oldValue)>();
+
+            while (true)
+            {
+                // Find a preview occupying checkIndex at this segment
+                LinkedBusbarPreview? blocker = null;
+                foreach (var other in _linkedPreviews)
+                {
+                    if (other == preview || !other.IsActive) continue;
+                    if (segmentIndex < other.SegmentOffsets.Count && other.SegmentOffsets[segmentIndex] == checkIndex)
+                    {
+                        blocker = other;
+                        break;
+                    }
+                }
+
+                if (blocker == null) break; // no one blocking, done
+
+                int pushedNew = checkIndex + delta;
+                if (Math.Abs(pushedNew) > _refMaxIndex) return; // can't push further, block entire move
+                pushChain.Add((blocker, checkIndex));
+                checkIndex = pushedNew; // check if the pushed position is also occupied
+            }
+
+            // Apply pushes outermost first
+            for (int i = pushChain.Count - 1; i >= 0; i--)
+            {
+                pushChain[i].p.SegmentOffsets[segmentIndex] = pushChain[i].oldValue + delta;
+            }
+        }
+        else
+        {
+            // Moving toward reference: cascade-push directly blocking previews inward
+            int checkIndex = newValue;
+            var pushChain = new List<(LinkedBusbarPreview p, int oldValue)>();
+
+            while (true)
+            {
+                LinkedBusbarPreview? blocker = null;
+                foreach (var other in _linkedPreviews)
+                {
+                    if (other == preview || !other.IsActive) continue;
+                    if (segmentIndex < other.SegmentOffsets.Count && other.SegmentOffsets[segmentIndex] == checkIndex)
+                    {
+                        blocker = other;
+                        break;
+                    }
+                }
+
+                if (blocker == null) break;
+
+                int pushedNew = checkIndex + delta;
+                // Can't push past reference (sign change)
+                if (Math.Sign(pushedNew) != Math.Sign(checkIndex)) return;
+                pushChain.Add((blocker, checkIndex));
+                checkIndex = pushedNew;
+            }
+
+            // Apply pushes innermost first
+            for (int i = pushChain.Count - 1; i >= 0; i--)
+            {
+                pushChain[i].p.SegmentOffsets[segmentIndex] = pushChain[i].oldValue + delta;
+            }
+        }
+
+        // Move the source preview
+        preview.SegmentOffsets[segmentIndex] = newValue;
+
+        // Recalculate and redraw all
+        foreach (var p in _linkedPreviews)
+        {
+            if (p.IsActive)
+            {
+                CalculateLinkedBusbarGeometry(p);
+                RenderLinkedPreview(p);
+            }
+        }
+    }
+
+    private void HandleLinkedBusbarHover(System.Windows.Input.MouseEventArgs e)
+    {
+        var mousePos = GetCanvasMousePosition(e);
+
+        LinkedBusbarPreview? bestPreview = null;
+        int bestSegment = -1;
+        double bestDist = 5.0;
+
+        foreach (var preview in _linkedPreviews)
+        {
+            if (!preview.IsActive || preview.JointPositions.Count < 2) continue;
+            for (int i = 0; i < preview.JointPositions.Count - 1; i++)
+            {
+                double dist = DistanceToSegment(mousePos, preview.JointPositions[i], preview.JointPositions[i + 1]);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    bestPreview = preview;
+                    bestSegment = i;
+                }
+            }
+        }
+
+        bool changed = (bestPreview != _hoveredPreview || bestSegment != _hoveredSegmentIndex);
+        _hoveredPreview = bestPreview;
+        _hoveredSegmentIndex = bestSegment;
+
+        if (changed)
+        {
+            foreach (var p in _linkedPreviews)
+            {
+                if (p.IsActive) RenderLinkedPreview(p);
+            }
+        }
+    }
+
+    private double DistanceToSegment(Point2D pt, Point2D segStart, Point2D segEnd)
+    {
+        double dx = segEnd.X - segStart.X;
+        double dy = segEnd.Y - segStart.Y;
+        double lenSq = dx * dx + dy * dy;
+        if (lenSq < 0.0001) return pt.DistanceTo(segStart);
+
+        double t = ((pt.X - segStart.X) * dx + (pt.Y - segStart.Y) * dy) / lenSq;
+        t = Math.Max(0, Math.Min(1, t));
+
+        return pt.DistanceTo(new Point2D(segStart.X + t * dx, segStart.Y + t * dy));
+    }
+
+    private int? FindNearestStartRefIndex(Point2D position, double maxDistance)
+    {
+        int? nearest = null;
+        double nearestDist = maxDistance;
+        foreach (var kvp in _refStartPoints)
+        {
+            double dist = position.DistanceTo(kvp.Value);
+            if (dist < nearestDist) { nearestDist = dist; nearest = kvp.Key; }
+        }
+        return nearest;
+    }
+
+    private void ConfirmLinkedBusbars()
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null || _linkedReference == null)
+        {
+            ExitLinkedBusbarMode();
+            return;
+        }
+
+        if (_isLinkedEditMode)
+        {
+            // Edit mode: update existing busbars and handle additions/removals
+            int updatedCount = 0;
+            int addedCount = 0;
+            int removedCount = 0;
+
+            // Collect existing busbars that were being edited
+            var existingEdited = new HashSet<Busbar>(_linkedEditMap.Values);
+
+            foreach (var preview in _linkedPreviews)
+            {
+                if (!preview.IsActive || preview.JointPositions.Count < 2)
+                {
+                    // Inactive preview with an existing busbar → remove it
+                    if (_linkedEditMap.TryGetValue(preview, out var toRemove))
+                    {
+                        _busbarRenderer?.ClearBusbarVisuals(toRemove);
+                        activeLayer.Busbars.Remove(toRemove);
+                        removedCount++;
+                    }
+                    continue;
+                }
+
+                if (_linkedEditMap.TryGetValue(preview, out var existingBusbar))
+                {
+                    // Update existing busbar
+                    ApplyPreviewToBusbar(preview, existingBusbar);
+                    updatedCount++;
+                }
+                else
+                {
+                    // New preview added during edit → create new busbar
+                    string busbarName = _nextBusbarLetter.ToString();
+                    var busbar = new Busbar(busbarName);
+                    ApplyPreviewToBusbar(preview, busbar);
+                    activeLayer.AddBusbar(busbar);
+                    if (_nextBusbarLetter == 'z') _nextBusbarLetter = 'a'; else _nextBusbarLetter++;
+                    addedCount++;
+                }
+            }
+
+            // Redraw all
+            if (_busbarRenderer != null)
+                _busbarRenderer.RedrawAllBusbars(activeLayer, _lastActiveBusbar, _currentProject.DimensionMode);
+
+            ExitLinkedBusbarMode();
+            UpdateUI();
+            RefreshBusbarList();
+            UpdateStatusBar($"Linked busbars: {updatedCount} updated, {addedCount} added, {removedCount} removed.");
+        }
+        else
+        {
+            // Create mode: create new busbars from all active previews
+            int confirmedCount = 0;
+            foreach (var preview in _linkedPreviews)
+            {
+                if (!preview.IsActive || preview.JointPositions.Count < 2) continue;
+
+                string busbarName = _nextBusbarLetter.ToString();
+                var busbar = new Busbar(busbarName);
+                ApplyPreviewToBusbar(preview, busbar);
+                activeLayer.AddBusbar(busbar);
+
+                if (_busbarRenderer != null)
+                    _busbarRenderer.DrawBusbar(busbar, false, _currentProject.DimensionMode);
+
+                if (_nextBusbarLetter == 'z') _nextBusbarLetter = 'a'; else _nextBusbarLetter++;
+                confirmedCount++;
+            }
+
+            ExitLinkedBusbarMode();
+            UpdateUI();
+            RefreshBusbarList();
+            UpdateStatusBar($"Created {confirmedCount} linked busbar(s).");
+        }
+    }
+
+    /// <summary>
+    /// Applies preview geometry to a busbar (used by both create and edit confirm paths)
+    /// </summary>
+    private void ApplyPreviewToBusbar(LinkedBusbarPreview preview, Busbar busbar)
+    {
+        busbar.Segments.Clear();
+        busbar.Bends.Clear();
+
+        for (int i = 0; i < preview.JointPositions.Count - 1; i++)
+        {
+            var start = preview.JointPositions[i];
+            var end = preview.JointPositions[i + 1];
+            var segment = new Segment(start, end);
+
+            if (i == 0)
+                segment.BendAngle = 0;
+            else if (i - 1 < _linkedReference!.Bends.Count)
+                segment.BendAngle = _linkedReference.Bends[i - 1].Angle;
+
+            busbar.AddSegment(segment);
+
+            if (i < preview.JointPositions.Count - 2 && i < _linkedReference!.Bends.Count)
+            {
+                var refBend = _linkedReference.Bends[i];
+                busbar.AddBend(new Bend(end, refBend.Angle, _currentProject.MaterialSettings.BendToolRadius));
+            }
+        }
+
+        busbar.LinkedTo = _linkedReference;
+        busbar.LinkedSegmentOffsets = new List<int>(preview.SegmentOffsets);
+        BendCalculator.CalculateFlatLength(busbar, _currentProject.MaterialSettings);
+        ValidationEngine.ValidateBusbar(busbar);
+    }
+
+    private void CancelLinkedBusbars()
+    {
+        if (_isLinkedEditMode)
+        {
+            // Restore real busbar visuals that were hidden during edit
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null && _busbarRenderer != null)
+            {
+                foreach (var busbar in _linkedEditMap.Values)
+                {
+                    _busbarRenderer.DrawBusbar(busbar, false, _currentProject.DimensionMode);
+                }
+            }
+        }
+        ExitLinkedBusbarMode();
+    }
+
+    private void UpdateLinkedBusbars(Busbar reference)
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return;
+
+        // Temporarily set _linkedReference to compute geometry
+        var savedRef = _linkedReference;
+        _linkedReference = reference;
+        ComputeLinkedReferenceGeometry();
+
+        foreach (var busbar in activeLayer.Busbars)
+        {
+            if (busbar.LinkedTo != reference) continue;
+
+            var tempPreview = new LinkedBusbarPreview
+            {
+                SegmentOffsets = new List<int>(busbar.LinkedSegmentOffsets)
+            };
+            CalculateLinkedBusbarGeometry(tempPreview);
+            if (tempPreview.JointPositions.Count < 2) continue;
+
+            busbar.Segments.Clear();
+            busbar.Bends.Clear();
+
+            for (int i = 0; i < tempPreview.JointPositions.Count - 1; i++)
+            {
+                var start = tempPreview.JointPositions[i];
+                var end = tempPreview.JointPositions[i + 1];
+                var segment = new Segment(start, end);
+
+                if (i == 0) segment.BendAngle = 0;
+                else if (i - 1 < reference.Bends.Count) segment.BendAngle = reference.Bends[i - 1].Angle;
+
+                busbar.AddSegment(segment);
+
+                if (i < tempPreview.JointPositions.Count - 2 && i < reference.Bends.Count)
+                    busbar.AddBend(new Bend(end, reference.Bends[i].Angle, _currentProject.MaterialSettings.BendToolRadius));
+            }
+
+            BendCalculator.CalculateFlatLength(busbar, _currentProject.MaterialSettings);
+            ValidationEngine.ValidateBusbar(busbar);
+
+            if (_busbarRenderer != null)
+            {
+                _busbarRenderer.ClearBusbarVisuals(busbar);
+                _busbarRenderer.DrawBusbar(busbar, busbar == _lastActiveBusbar, _currentProject.DimensionMode);
+            }
+        }
+
+        _linkedReference = savedRef;
     }
 }
