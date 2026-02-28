@@ -135,6 +135,11 @@ public partial class MainWindow : Window
     private List<Ellipse> _allPointMarkers = new List<Ellipse>();
     private bool _isDraggingMoveControls = false;
     private System.Windows.Point _dragStartPoint;
+    // Lasso selection
+    private bool _isLassoSelecting = false;
+    private List<Point2D> _lassoPoints = new List<Point2D>();
+    private Polyline? _lassoVisual = null;
+    private Point2D _lassoMouseDownPos;
 
     // ===== LINKED BUSBAR MODE =====
     private bool _isLinkedBusbarMode = false;
@@ -1221,6 +1226,69 @@ public partial class MainWindow : Window
         }
     }
 
+    private void SelectPointsInLasso()
+    {
+        if (_lassoPoints.Count < 3) return;
+
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        // Check all busbar points (skip linked busbars)
+        foreach (var busbar in currentLayer.Busbars)
+        {
+            if (busbar.IsLinked) continue;
+
+            for (int i = 0; i <= busbar.Segments.Count; i++)
+            {
+                var point = GetBusbarPoint(busbar, i);
+                if (PointInPolygon(point, _lassoPoints))
+                {
+                    // Only select if not already selected
+                    if (!_selectedPoints.Any(p => p.busbar == busbar && p.pointIndex == i))
+                    {
+                        ToggleBusbarPointSelection(busbar, i);
+
+                        // Also select co-located start point
+                        foreach (var sp in currentLayer.StartPoints)
+                        {
+                            if (sp.Position.DistanceTo(point) < 1.0 &&
+                                !_selectedStartPoints.Contains(sp))
+                            {
+                                ToggleStartPointSelection(sp);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check all start points
+        foreach (var sp in currentLayer.StartPoints)
+        {
+            if (PointInPolygon(sp.Position, _lassoPoints) && !_selectedStartPoints.Contains(sp))
+            {
+                ToggleStartPointSelection(sp);
+            }
+        }
+
+        int totalSelected = _selectedPoints.Count + _selectedStartPoints.Count;
+        UpdateStatusBar($"{totalSelected} point(s) selected. Use arrows to set direction, type dimension and press Enter.");
+    }
+
+    private bool PointInPolygon(Point2D test, List<Point2D> polygon)
+    {
+        bool inside = false;
+        for (int i = 0, j = polygon.Count - 1; i < polygon.Count; j = i++)
+        {
+            if ((polygon[i].Y > test.Y) != (polygon[j].Y > test.Y) &&
+                test.X < (polygon[j].X - polygon[i].X) * (test.Y - polygon[i].Y) / (polygon[j].Y - polygon[i].Y) + polygon[i].X)
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
     private void Hand_Click(object sender, RoutedEventArgs e)
     {
         _handToolActive = !_handToolActive;
@@ -1970,10 +2038,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Handle Move Points mode
+        // Handle Move Points mode — start potential lasso or single-click
         if (_isMovePointsMode)
         {
-            HandlePointSelection(e);
+            _lassoMouseDownPos = GetCanvasMousePosition(e);
+            _isLassoSelecting = false;
+            _lassoPoints.Clear();
+            _lassoPoints.Add(_lassoMouseDownPos);
+            canvasContainer.CaptureMouse();
+            e.Handled = true;
             return;
         }
 
@@ -2925,6 +2998,37 @@ public partial class MainWindow : Window
 
             _lastPanPoint = currentPoint;
             e.Handled = true;
+            return;
+        }
+
+        // Handle Move Points lasso selection
+        if (_isMovePointsMode && e.LeftButton == System.Windows.Input.MouseButtonState.Pressed && canvasContainer.IsMouseCaptured)
+        {
+            var pos = GetCanvasMousePosition(e);
+            if (!_isLassoSelecting)
+            {
+                double ldx = pos.X - _lassoMouseDownPos.X;
+                double ldy = pos.Y - _lassoMouseDownPos.Y;
+                if (Math.Sqrt(ldx * ldx + ldy * ldy) > 3.0) // 3mm world-space threshold
+                {
+                    _isLassoSelecting = true;
+                    _lassoVisual = new Polyline
+                    {
+                        Stroke = System.Windows.Media.Brushes.DodgerBlue,
+                        StrokeThickness = 0.5,
+                        StrokeDashArray = new System.Windows.Media.DoubleCollection { 4, 2 }
+                    };
+                    drawingCanvas.Children.Add(_lassoVisual);
+                }
+            }
+            if (_isLassoSelecting)
+            {
+                _lassoPoints.Add(pos);
+                var wpfPoints = new System.Windows.Media.PointCollection();
+                foreach (var lp in _lassoPoints)
+                    wpfPoints.Add(new System.Windows.Point(lp.X, lp.Y));
+                _lassoVisual!.Points = wpfPoints;
+            }
             return;
         }
 
@@ -4029,6 +4133,30 @@ public partial class MainWindow : Window
             // Restore cursor based on hand tool state
             canvasContainer.Cursor = _handToolActive ? System.Windows.Input.Cursors.Hand : System.Windows.Input.Cursors.Arrow;
             canvasContainer.ReleaseMouseCapture();
+            e.Handled = true;
+            return;
+        }
+
+        // Finish lasso selection or single-click point selection
+        if (_isMovePointsMode && canvasContainer.IsMouseCaptured)
+        {
+            canvasContainer.ReleaseMouseCapture();
+            if (_isLassoSelecting)
+            {
+                SelectPointsInLasso();
+                if (_lassoVisual != null)
+                {
+                    drawingCanvas.Children.Remove(_lassoVisual);
+                    _lassoVisual = null;
+                }
+                _lassoPoints.Clear();
+                _isLassoSelecting = false;
+            }
+            else
+            {
+                // Was a single click — do normal point toggle selection
+                HandlePointSelection(e);
+            }
             e.Handled = true;
         }
     }
