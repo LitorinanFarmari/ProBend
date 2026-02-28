@@ -424,22 +424,97 @@ public partial class MainWindow : Window
 
     private void DeleteBusbar_Click(object sender, RoutedEventArgs e)
     {
-        if (lstBusbars.SelectedIndex >= 0)
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (lstBusbars.SelectedIndex >= 0 && activeLayer != null && lstBusbars.SelectedIndex < activeLayer.Busbars.Count)
         {
-            var activeLayer = _currentProject.GetActiveLayer();
-            if (activeLayer != null && activeLayer.Busbars.Count > lstBusbars.SelectedIndex)
+            DeleteBusbar(activeLayer.Busbars[lstBusbars.SelectedIndex]);
+        }
+    }
+
+    private void DeleteBusbar(Busbar busbar)
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return;
+
+        // If this busbar is a reference for linked busbars, delete them too
+        var linkedChildren = activeLayer.Busbars.Where(b => b.LinkedTo == busbar).ToList();
+        if (linkedChildren.Count > 0)
+        {
+            var result = MessageBox.Show(
+                $"This busbar has {linkedChildren.Count} linked busbar(s). Delete them too?",
+                "Delete Reference Busbar",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (result == MessageBoxResult.Cancel)
+                return;
+
+            if (result == MessageBoxResult.Yes)
             {
-                activeLayer.Busbars.RemoveAt(lstBusbars.SelectedIndex);
-                RedrawCanvas();
-                UpdateUI();
-                UpdateStatusBar("Busbar deleted");
+                // Delete all linked children
+                foreach (var child in linkedChildren)
+                {
+                    if (_busbarRenderer != null)
+                        _busbarRenderer.ClearBusbarVisuals(child);
+                    activeLayer.Busbars.Remove(child);
+                }
+            }
+            else
+            {
+                // Unlink children (make independent)
+                foreach (var child in linkedChildren)
+                {
+                    child.LinkedTo = null;
+                    child.LinkedSegmentOffsets.Clear();
+                }
             }
         }
+
+        // Delete the busbar itself
+        if (_busbarRenderer != null)
+            _busbarRenderer.ClearBusbarVisuals(busbar);
+        activeLayer.Busbars.Remove(busbar);
+
+        if (_lastActiveBusbar == busbar)
+            _lastActiveBusbar = null;
+
+        lstBusbars.SelectedIndex = -1;
+        RefreshBusbarList();
+        if (_busbarRenderer != null)
+            _busbarRenderer.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
+        UpdateUI();
+        UpdateStatusBar("Busbar deleted");
     }
 
     private void About_Click(object sender, RoutedEventArgs e)
     {
-        MessageBox.Show("Busbar CAD - MVP v1.0\nSpecialized CAD for bent busbars\n\nBuild with Claude Code",
+        MessageBox.Show(
+            "Busbar CAD v1.0\n" +
+            "Specialized CAD for bent busbars\n\n" +
+            "===== TOOLS & HOTKEYS =====\n\n" +
+            "Draw (D)\n" +
+            "Click to place busbar points. Enter angle and length in the grid.\n" +
+            "Right-click or ESC to finish the busbar.\n\n" +
+            "Move (M)\n" +
+            "Click points to select them. Use arrow buttons to set direction,\n" +
+            "type distance and press Enter to move. ESC to cancel.\n\n" +
+            "Start Points (S)\n" +
+            "Place start points on reference lines for machine positioning.\n" +
+            "Type a distance for exact spacing from the anchor point.\n\n" +
+            "Linked Busbar (L)\n" +
+            "Create parallel busbars offset from a reference busbar.\n" +
+            "Click snap points on the start reference line to add.\n" +
+            "Left/Right-click segments to adjust offset. Enter to confirm.\n\n" +
+            "Pan (H)\n" +
+            "Click and drag to pan the view.\n\n" +
+            "===== VIEW =====\n\n" +
+            "Zoom In (+)  /  Zoom Out (-)  /  Zoom to Fit (F)\n" +
+            "Mouse wheel also zooms in/out.\n\n" +
+            "===== OTHER =====\n\n" +
+            "Export (Ctrl+E) - Export .bep files for the bending machine.\n" +
+            "Busbar list - Select a busbar to edit. Use buttons below the list\n" +
+            "to Rename, Edit Link, Unlink, or Delete.\n\n" +
+            "Built with Claude Code",
             "About Busbar CAD");
     }
 
@@ -1267,10 +1342,13 @@ public partial class MainWindow : Window
         _isEditingLength = false;
         _mouseStopTimer?.Stop();  // Stop any running timer
         UpdateSegmentList();
-        txtBusbarName.Text = _nextBusbarLetter.ToString();
 
-        // Clear the busbar selection when starting a new drawing
+        // Clear selection BEFORE changing name to prevent TextChanged from overwriting previous busbar's name
         lstBusbars.SelectedIndex = -1;
+
+        txtBusbarName.TextChanged -= txtBusbarName_TextChanged;
+        txtBusbarName.Text = _nextBusbarLetter.ToString();
+        txtBusbarName.TextChanged += txtBusbarName_TextChanged;
 
         txtInstructions.Visibility = Visibility.Collapsed;
 
@@ -5523,6 +5601,18 @@ public partial class MainWindow : Window
     // Keyboard Shortcuts
     private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        // Block hotkeys when typing in a TextBox (busbar name, dimension input, etc.)
+        if (e.OriginalSource is System.Windows.Controls.TextBox focusedBox && focusedBox != txtMoveDimension)
+        {
+            // Enter confirms and moves focus back to canvas
+            if (e.Key == Key.Enter || e.Key == Key.Escape)
+            {
+                canvasContainer.Focus();
+                e.Handled = true;
+            }
+            return;
+        }
+
         // Handle arrow keys in Move Points mode (only if not typing in dimension box)
         if (_isMovePointsMode && !txtMoveDimension.IsFocused)
         {
@@ -5906,54 +5996,24 @@ public partial class MainWindow : Window
             var activeLayer = _currentProject.GetActiveLayer();
             if (lstBusbars.SelectedIndex < 0 || activeLayer == null || lstBusbars.SelectedIndex >= activeLayer.Busbars.Count)
             {
+                UpdateBusbarActionButtons(null);
                 return;
             }
 
-            // Get the selected busbar from the model (single source of truth)
             var selectedBusbar = activeLayer.Busbars[lstBusbars.SelectedIndex];
-
-            // If linked, offer options: Edit Link / Unlink / Cancel
-            if (selectedBusbar.IsLinked)
-            {
-                var result = MessageBox.Show(
-                    "This is a linked busbar.\n\nYes = Edit linked busbars\nNo = Unlink (make independent)\nCancel = Close",
-                    "Linked Busbar",
-                    MessageBoxButton.YesNoCancel,
-                    MessageBoxImage.Question);
-
-                if (result == MessageBoxResult.Yes)
-                {
-                    // Edit Link: enter linked busbar mode with existing linked busbars as previews
-                    lstBusbars.SelectedIndex = -1;
-                    EditLinkedBusbars(selectedBusbar.LinkedTo!);
-                    return;
-                }
-                else if (result == MessageBoxResult.No)
-                {
-                    selectedBusbar.LinkedTo = null;
-                    selectedBusbar.LinkedSegmentOffsets.Clear();
-                    RefreshBusbarList();
-                    lstBusbars.SelectedIndex = activeLayer.Busbars.IndexOf(selectedBusbar);
-                }
-                else
-                {
-                    // Cancel — deselect, linked busbars can only be edited via their reference
-                    lstBusbars.SelectedIndex = -1;
-                    return;
-                }
-            }
+            UpdateBusbarActionButtons(selectedBusbar);
 
             _lastActiveBusbar = selectedBusbar;
 
-            // Highlight the selected busbar (make start/end markers thicker)
+            // Highlight the selected busbar
             HighlightBusbar(_lastActiveBusbar);
 
-            // Display its name in the textbox (temporarily unhook event to avoid triggering RefreshBusbarList)
+            // Display its name in the textbox
             txtBusbarName.TextChanged -= txtBusbarName_TextChanged;
             txtBusbarName.Text = selectedBusbar.Name;
             txtBusbarName.TextChanged += txtBusbarName_TextChanged;
 
-            // Display its segments in the right panel DataGrid with dimension mode applied
+            // Display its segments in the right panel DataGrid
             RegenerateAllDimensionData(selectedBusbar);
             UpdateDataGridBinding();
 
@@ -5963,6 +6023,55 @@ public partial class MainWindow : Window
         {
             UpdateStatusBar($"Error selecting busbar: {ex.Message}");
         }
+    }
+
+    private void UpdateBusbarActionButtons(Busbar? busbar)
+    {
+        if (busbar == null)
+        {
+            btnBusbarRename.Visibility = Visibility.Collapsed;
+            btnBusbarEditLink.Visibility = Visibility.Collapsed;
+            btnBusbarUnlink.Visibility = Visibility.Collapsed;
+            btnBusbarDelete.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        btnBusbarRename.Visibility = Visibility.Visible;
+        btnBusbarDelete.Visibility = Visibility.Visible;
+        btnBusbarEditLink.Visibility = busbar.IsLinked ? Visibility.Visible : Visibility.Collapsed;
+        btnBusbarUnlink.Visibility = busbar.IsLinked ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BusbarRename_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastActiveBusbar == null) return;
+        txtBusbarName.Focus();
+        txtBusbarName.SelectAll();
+    }
+
+    private void BusbarEditLink_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastActiveBusbar == null || !_lastActiveBusbar.IsLinked) return;
+        var reference = _lastActiveBusbar.LinkedTo!;
+        lstBusbars.SelectedIndex = -1;
+        EditLinkedBusbars(reference);
+    }
+
+    private void BusbarUnlink_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastActiveBusbar == null || !_lastActiveBusbar.IsLinked) return;
+        _lastActiveBusbar.LinkedTo = null;
+        _lastActiveBusbar.LinkedSegmentOffsets.Clear();
+        var activeLayer = _currentProject.GetActiveLayer();
+        RefreshBusbarList();
+        if (activeLayer != null)
+            lstBusbars.SelectedIndex = activeLayer.Busbars.IndexOf(_lastActiveBusbar);
+    }
+
+    private void BusbarDelete_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastActiveBusbar == null) return;
+        DeleteBusbar(_lastActiveBusbar);
     }
 
     private void txtBusbarName_TextChanged(object sender, TextChangedEventArgs e)
