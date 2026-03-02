@@ -7,6 +7,8 @@ namespace BusbarCAD.Models
         public double Radius { get; set; } // Tool radius
         public double BendAllowance { get; set; } // Calculated arc length
 
+        public Bend() { } // Parameterless constructor for JSON deserialization
+
         public Bend(Point2D position, double angle, double radius)
         {
             Position = position;

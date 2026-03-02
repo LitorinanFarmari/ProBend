@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Shapes;
+using Newtonsoft.Json;
 
 namespace BusbarCAD.Models
 {
@@ -12,15 +13,18 @@ namespace BusbarCAD.Models
         public bool IsValid { get; set; }
         public double FlatLength { get; set; }
 
-        // Visual elements (for rendering and cleanup)
-        public List<UIElement> VisualShapes { get; set; } = new List<UIElement>();
-        public Line? StartMarker { get; set; } = null;
-        public Line? EndMarker { get; set; } = null;
+        // Visual elements (for rendering and cleanup) — not serialized
+        [JsonIgnore] public List<UIElement> VisualShapes { get; set; } = new List<UIElement>();
+        [JsonIgnore] public Line? StartMarker { get; set; } = null;
+        [JsonIgnore] public Line? EndMarker { get; set; } = null;
 
         // Linked busbar properties
-        public Busbar? LinkedTo { get; set; } = null;
+        [JsonIgnore] public Busbar? LinkedTo { get; set; } = null;
+        public string? LinkedToName { get; set; } = null; // Serialized reference to LinkedTo busbar by name
         public List<int> LinkedSegmentOffsets { get; set; } = new List<int>(); // Per-segment offset (signed, in busbar-thickness steps)
-        public bool IsLinked => LinkedTo != null;
+        [JsonIgnore] public bool IsLinked => LinkedTo != null;
+
+        public Busbar() { Segments = new List<Segment>(); Bends = new List<Bend>(); Name = ""; } // For JSON deserialization
 
         public Busbar(string name)
         {

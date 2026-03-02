@@ -4,6 +4,8 @@ namespace BusbarCAD.Models
     {
         public Point2D Position { get; set; }
 
+        public StartPoint() { } // Parameterless constructor for JSON deserialization
+
         public StartPoint(Point2D position)
         {
             Position = position;

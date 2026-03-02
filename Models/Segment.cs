@@ -1,3 +1,5 @@
+using Newtonsoft.Json;
+
 namespace BusbarCAD.Models
 {
     public enum SegmentType
@@ -21,6 +23,8 @@ namespace BusbarCAD.Models
         // Bend angle before this segment (0 for first segment, bend angle for subsequent segments)
         public double BendAngle { get; set; }
 
+        public Segment() { } // Parameterless constructor for JSON deserialization
+
         public Segment(Point2D start, Point2D end)
         {
             StartPoint = start;
@@ -34,6 +38,7 @@ namespace BusbarCAD.Models
         /// Segment length (centerline length from StartPoint to EndPoint)
         /// Setting this adjusts EndPoint while keeping the same direction
         /// </summary>
+        [JsonIgnore]
         public double Length
         {
             get => StartPoint.DistanceTo(EndPoint);
@@ -51,6 +56,7 @@ namespace BusbarCAD.Models
         /// <summary>
         /// Direction angle in radians
         /// </summary>
+        [JsonIgnore]
         public double AngleRadians
         {
             get
@@ -65,6 +71,7 @@ namespace BusbarCAD.Models
         /// Direction angle in degrees (derived from points)
         /// Setting this adjusts EndPoint to match new angle while keeping the same length
         /// </summary>
+        [JsonIgnore]
         public double Angle
         {
             get => AngleRadians * 180.0 / Math.PI;
@@ -84,6 +91,7 @@ namespace BusbarCAD.Models
         /// Straight section length (length minus trim distances for bends)
         /// This is the actual straight material length of this segment after accounting for bend trimming
         /// </summary>
+        [JsonIgnore]
         public double StraightSectionLength => Length - StartTrimDistance - EndTrimDistance;
 
         public override string ToString()

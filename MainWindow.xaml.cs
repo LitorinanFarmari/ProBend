@@ -1,4 +1,5 @@
-﻿using System.Windows;
+﻿using System.IO;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -8,6 +9,7 @@ using BusbarCAD.Calculations;
 using BusbarCAD.Export;
 using BusbarCAD.Rendering;
 using Microsoft.Win32;
+using Newtonsoft.Json;
 
 namespace BusbarCAD;
 
@@ -51,6 +53,7 @@ public class SavedBusbar
 public partial class MainWindow : Window
 {
     private Project _currentProject;
+    private string? _currentSavePath = null;
     private bool _isDrawing = false;
     private List<Point2D> _currentPoints = new List<Point2D>();
     private Polygon? _previewPolygon = null;
@@ -343,18 +346,176 @@ public partial class MainWindow : Window
             MessageBoxButton.YesNo) == MessageBoxResult.Yes)
         {
             drawingCanvas.Children.Clear();
+            _currentSavePath = null;
+            _nextBusbarLetter = 'a';
+            _savedBusbars.Clear();
+            _currentBusbarIndex = -1;
+            _lastActiveBusbar = null;
             InitializeProject();
+            UpdateWindowTitle();
         }
     }
 
     private void OpenProject_Click(object sender, RoutedEventArgs e)
     {
-        MessageBox.Show("Project load functionality coming soon!", "Open Project");
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Filter = "ProBend Project (*.probend)|*.probend|All Files (*.*)|*.*",
+            Title = "Open Project"
+        };
+
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            var json = File.ReadAllText(dlg.FileName);
+            var settings = new JsonSerializerSettings
+            {
+                Converters = { new Newtonsoft.Json.Converters.StringEnumConverter() },
+                NullValueHandling = NullValueHandling.Ignore
+            };
+
+            var project = JsonConvert.DeserializeObject<Project>(json, settings);
+            if (project == null)
+            {
+                MessageBox.Show("Failed to read project file.", "Open Project", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            // Resolve LinkedTo references by name
+            foreach (var layer in project.Layers)
+            {
+                foreach (var busbar in layer.Busbars)
+                {
+                    if (!string.IsNullOrEmpty(busbar.LinkedToName))
+                    {
+                        busbar.LinkedTo = layer.Busbars.FirstOrDefault(b => b.Name == busbar.LinkedToName);
+                    }
+                }
+            }
+
+            // Clear current canvas and state
+            drawingCanvas.Children.Clear();
+            _currentPoints.Clear();
+            _currentSegments.Clear();
+            _currentShapes.Clear();
+            _selectedPoints.Clear();
+            _selectedPointMarkers.Clear();
+            _selectedStartPoints.Clear();
+            _startPointMarkers.Clear();
+            _allPointMarkers.Clear();
+            _isDrawing = false;
+            _isMovePointsMode = false;
+            _isLinkedBusbarMode = false;
+            _isStartPointMode = false;
+            _savedBusbars.Clear();
+            _currentBusbarIndex = -1;
+            _lastActiveBusbar = null;
+
+            // Set project
+            _currentProject = project;
+            _currentSavePath = dlg.FileName;
+
+            // Determine next busbar letter from existing names
+            _nextBusbarLetter = 'a';
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null)
+            {
+                foreach (var busbar in activeLayer.Busbars)
+                {
+                    if (busbar.Name.Length == 1 && char.IsLetter(busbar.Name[0]))
+                    {
+                        char c = busbar.Name[0];
+                        if (c >= _nextBusbarLetter)
+                            _nextBusbarLetter = (char)(c + 1);
+                    }
+                }
+                if (_nextBusbarLetter > 'z') _nextBusbarLetter = 'a';
+            }
+
+            // Redraw everything
+            if (_busbarRenderer != null && activeLayer != null)
+            {
+                _busbarRenderer.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
+            }
+            RedrawAllStartPointMarkers();
+
+            // Update UI
+            UpdateUI();
+            UpdateWindowTitle();
+            UpdateStatusBar($"Opened: {System.IO.Path.GetFileName(dlg.FileName)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error opening project:\n{ex.Message}", "Open Project", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void SaveProject_Click(object sender, RoutedEventArgs e)
     {
-        MessageBox.Show("Project save functionality coming soon!", "Save Project");
+        if (_currentSavePath != null)
+        {
+            SaveProjectToFile(_currentSavePath);
+        }
+        else
+        {
+            SaveProjectAs_Click(sender, e);
+        }
+    }
+
+    private void SaveProjectAs_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "ProBend Project (*.probend)|*.probend",
+            Title = "Save Project As",
+            FileName = _currentProject.Name
+        };
+
+        if (dlg.ShowDialog() != true) return;
+
+        _currentSavePath = dlg.FileName;
+        SaveProjectToFile(_currentSavePath);
+    }
+
+    private void SaveProjectToFile(string filePath)
+    {
+        try
+        {
+            // Populate LinkedToName for serialization
+            foreach (var layer in _currentProject.Layers)
+            {
+                foreach (var busbar in layer.Busbars)
+                {
+                    busbar.LinkedToName = busbar.LinkedTo?.Name;
+                }
+            }
+
+            _currentProject.UpdateModifiedDate();
+
+            var settings = new JsonSerializerSettings
+            {
+                Formatting = Formatting.Indented,
+                Converters = { new Newtonsoft.Json.Converters.StringEnumConverter() },
+                NullValueHandling = NullValueHandling.Ignore
+            };
+
+            var json = JsonConvert.SerializeObject(_currentProject, settings);
+            File.WriteAllText(filePath, json);
+
+            UpdateWindowTitle();
+            UpdateStatusBar($"Saved: {System.IO.Path.GetFileName(filePath)}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error saving project:\n{ex.Message}", "Save Project", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void UpdateWindowTitle()
+    {
+        string fileName = _currentSavePath != null ? System.IO.Path.GetFileName(_currentSavePath) : "Untitled";
+        Title = $"BusbarCAD - {fileName}";
     }
 
     private void Export_Click(object sender, RoutedEventArgs e)
@@ -482,6 +643,10 @@ public partial class MainWindow : Window
 
         if (_lastActiveBusbar == busbar)
             _lastActiveBusbar = null;
+
+        // Keep _savedBusbars in sync
+        _savedBusbars.Clear();
+        _currentBusbarIndex = -1;
 
         lstBusbars.SelectedIndex = -1;
         RefreshBusbarList();
@@ -5729,6 +5894,14 @@ public partial class MainWindow : Window
     // Keyboard Shortcuts
     private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
+        // Ctrl+S = Save (works from anywhere)
+        if (e.Key == Key.S && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            SaveProject_Click(this, new RoutedEventArgs());
+            e.Handled = true;
+            return;
+        }
+
         // Block hotkeys when typing in a TextBox (busbar name, dimension input, etc.)
         if (e.OriginalSource is System.Windows.Controls.TextBox focusedBox && focusedBox != txtMoveDimension)
         {

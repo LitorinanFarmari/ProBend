@@ -21,7 +21,8 @@
             <MenuItem Header="_File">
                 <MenuItem Header="_New Project" Click="NewProject_Click"/>
                 <MenuItem Header="_Open Project" Click="OpenProject_Click"/>
-                <MenuItem Header="_Save Project" Click="SaveProject_Click"/>
+                <MenuItem Header="_Save Project" Click="SaveProject_Click" InputGestureText="Ctrl+S"/>
+                <MenuItem Header="Save _As..." Click="SaveProjectAs_Click"/>
                 <Separator/>
                 <MenuItem Header="_Export .bep Files" Click="Export_Click"/>
                 <Separator/>

@@ -2,6 +2,8 @@ using System.Collections.Generic;
 
 namespace BusbarCAD.Models
 {
+    // TODO: When implementing multi-layer feature, update save/open logic in MainWindow.xaml.cs
+    // to handle layer switching, active layer tracking, and per-layer visibility state.
     public class Layer
     {
         public string Name { get; set; }
@@ -10,6 +12,8 @@ namespace BusbarCAD.Models
         public bool Visible { get; set; }
         public List<Busbar> Busbars { get; set; }
         public List<StartPoint> StartPoints { get; set; }
+
+        public Layer() { } // Parameterless constructor for JSON deserialization
 
         public Layer(string name, double zPosition)
         {

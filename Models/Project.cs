@@ -14,6 +14,8 @@ namespace BusbarCAD.Models
         public string ExportPath { get; set; }
         public DimensionMode DimensionMode { get; set; }
 
+        public Project() { } // Parameterless constructor for JSON deserialization
+
         public Project(string name)
         {
             Name = name;
