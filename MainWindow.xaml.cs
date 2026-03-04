@@ -184,6 +184,20 @@ public partial class MainWindow : Window
     private double _startPointLastAngle = 0;       // Last preview angle for confirming typed distance
     private Dictionary<StartPoint, Point2D> _originalStartPointPositions = new Dictionary<StartPoint, Point2D>();
 
+    // ===== MEASURE MODE =====
+    private bool _isMeasureMode = false;
+    private int _measureClickCount = 0; // 0=waiting for point1, 1=waiting for point2, 2=waiting for placement
+    private string? _measureBusbar1 = null;
+    private int _measurePointIndex1 = -1;
+    private string? _measureBusbar2 = null;
+    private int _measurePointIndex2 = -1;
+    private Point2D _measurePoint1;
+    private Point2D _measurePoint2;
+    private MeasurementType _measurePreviewType = MeasurementType.Direct;
+    private double _measurePreviewOffset = 0;
+    private List<UIElement> _measurePreviewShapes = new List<UIElement>();
+    private Measurement? _selectedMeasurement = null;
+
     public enum MoveDirection
     {
         None,
@@ -408,6 +422,10 @@ public partial class MainWindow : Window
             _isMovePointsMode = false;
             _isLinkedBusbarMode = false;
             _isStartPointMode = false;
+            _isMeasureMode = false;
+            _measureClickCount = 0;
+            _selectedMeasurement = null;
+            _measurePreviewShapes.Clear();
             _savedBusbars.Clear();
             _currentBusbarIndex = -1;
             _lastActiveBusbar = null;
@@ -439,6 +457,7 @@ public partial class MainWindow : Window
                 _busbarRenderer.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
             }
             RedrawAllStartPointMarkers();
+            RedrawAllMeasurements();
 
             // Update UI
             UpdateUI();
@@ -636,6 +655,9 @@ public partial class MainWindow : Window
             }
         }
 
+        // Remove any measurements referencing this busbar
+        RemoveMeasurementsForBusbar(busbar.Name);
+
         // Delete the busbar itself
         if (_busbarRenderer != null)
             _busbarRenderer.ClearBusbarVisuals(busbar);
@@ -720,8 +742,9 @@ public partial class MainWindow : Window
             btnMove.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 200, 200));
             UpdateStatusBar("Move Points mode - Click points to select, use arrows to set direction, type dimension and press Enter");
 
-            // Deactivate drawing mode
+            // Deactivate other modes
             _isDrawing = false;
+            if (_isMeasureMode) ExitMeasureMode();
 
             // Show move UI controls
             ShowMoveControls();
@@ -1025,6 +1048,7 @@ public partial class MainWindow : Window
         {
             _busbarRenderer?.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
         }
+        RedrawAllMeasurements();
 
         // Update linked busbars for preview
         foreach (var busbar in affectedBusbars)
@@ -1090,6 +1114,7 @@ public partial class MainWindow : Window
         {
             _busbarRenderer?.RedrawAllBusbars(activeLayer, null, _currentProject.DimensionMode);
         }
+        RedrawAllMeasurements();
 
         // Update linked busbars for all affected reference busbars
         foreach (var busbar in affectedBusbars)
@@ -2196,6 +2221,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Handle Measure mode
+        if (_isMeasureMode)
+        {
+            HandleMeasureClick(e);
+            return;
+        }
+
         // Handle Start Point mode
         if (_isStartPointMode)
         {
@@ -3195,6 +3227,13 @@ public partial class MainWindow : Window
                 _lassoVisual!.Points = wpfPoints;
             }
             return;
+        }
+
+        // Handle Measure mode hover preview
+        if (_isMeasureMode)
+        {
+            HandleMeasureMouseMove(e);
+            // Don't return — let other hover effects (like cursor) still work
         }
 
         // Handle Linked Busbar mode hover
@@ -5903,7 +5942,9 @@ public partial class MainWindow : Window
         }
 
         // Block hotkeys when typing in a TextBox (busbar name, dimension input, etc.)
-        if (e.OriginalSource is System.Windows.Controls.TextBox focusedBox && focusedBox != txtMoveDimension)
+        // But allow DataGrid editing TextBoxes and move dimension box to handle their own keys
+        if (e.OriginalSource is System.Windows.Controls.TextBox focusedBox && focusedBox != txtMoveDimension
+            && !dgSegments.IsKeyboardFocusWithin)
         {
             // Enter confirms and moves focus back to canvas
             if (e.Key == Key.Enter || e.Key == Key.Escape)
@@ -6055,9 +6096,64 @@ public partial class MainWindow : Window
             MovePoints_Click(this, new RoutedEventArgs());
             e.Handled = true;
         }
-        else if (e.Key == Key.S && !_isDrawing && !_isMovePointsMode && !_isLinkedBusbarMode)
+        else if (e.Key == Key.S && !_isDrawing && !_isMovePointsMode && !_isLinkedBusbarMode && !_isMeasureMode)
         {
             StartPoints_Click(this, new RoutedEventArgs());
+            e.Handled = true;
+        }
+        else if (e.Key == Key.T && !_isDrawing && !_isMovePointsMode && !_isStartPointMode && !_isLinkedBusbarMode)
+        {
+            Measure_Click(this, new RoutedEventArgs());
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Enter && _isMeasureMode && _measureClickCount == 2)
+        {
+            // Confirm measurement placement with Enter
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null)
+            {
+                var measurement = new Measurement(
+                    _measureBusbar1!, _measurePointIndex1,
+                    _measureBusbar2!, _measurePointIndex2,
+                    _measurePreviewType, _measurePreviewOffset);
+
+                activeLayer.Measurements.Add(measurement);
+
+                ClearMeasurePreview();
+                DrawMeasurement(measurement, _measurePoint1, _measurePoint2);
+
+                _measureClickCount = 0;
+                UpdateStatusBar("Measurement placed. Click to start another, or press ESC to exit.");
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && _isMeasureMode)
+        {
+            if (_measureClickCount > 0)
+            {
+                // Cancel current measurement in progress, stay in measure mode
+                _measureClickCount = 0;
+                ClearMeasurePreview();
+                UpdateStatusBar("Measure: Click a busbar point to start measuring (T)");
+            }
+            else
+            {
+                ExitMeasureMode();
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Delete && _isMeasureMode && _selectedMeasurement != null)
+        {
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null)
+            {
+                foreach (var shape in _selectedMeasurement.VisualShapes)
+                    drawingCanvas.Children.Remove(shape);
+                _selectedMeasurement.VisualShapes.Clear();
+                activeLayer.Measurements.Remove(_selectedMeasurement);
+                _selectedMeasurement = null;
+                UpdateStatusBar("Measurement deleted.");
+            }
             e.Handled = true;
         }
         else if (e.Key == Key.Escape && _isMovePointsMode)
@@ -6589,6 +6685,7 @@ public partial class MainWindow : Window
         {
             _busbarRenderer.RedrawAllBusbars(activeLayer, _lastActiveBusbar, _currentProject.DimensionMode);
         }
+        RedrawAllMeasurements();
 
         // Update any linked busbars that reference this one
         UpdateLinkedBusbars(busbar);
@@ -6605,6 +6702,7 @@ public partial class MainWindow : Window
             // Deactivate other modes
             if (_isDrawing) FinishDrawing();
             if (_isMovePointsMode) MovePoints_Click(this, new RoutedEventArgs());
+            if (_isMeasureMode) ExitMeasureMode();
             if (_handToolActive) Hand_Click(this, new RoutedEventArgs());
 
             btnStartPoints.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 230, 200));
@@ -6918,6 +7016,691 @@ public partial class MainWindow : Window
         }
 
         return nearest;
+    }
+
+    // ===== MEASURE MODE =====
+
+    private void Measure_Click(object sender, RoutedEventArgs e)
+    {
+        _isMeasureMode = !_isMeasureMode;
+
+        if (_isMeasureMode)
+        {
+            // Deactivate conflicting modes
+            if (_isDrawing) FinishDrawing();
+            if (_isMovePointsMode) MovePoints_Click(this, new RoutedEventArgs());
+            if (_isStartPointMode) StartPoints_Click(this, new RoutedEventArgs());
+            if (_isLinkedBusbarMode) CancelLinkedBusbars();
+            if (_handToolActive) Hand_Click(this, new RoutedEventArgs());
+
+            btnMeasure.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 220, 240));
+            _measureClickCount = 0;
+            _selectedMeasurement = null;
+            UpdateStatusBar("Measure: Click a busbar point to start measuring (T)");
+        }
+        else
+        {
+            ExitMeasureMode();
+        }
+    }
+
+    private void ExitMeasureMode()
+    {
+        _isMeasureMode = false;
+        _measureClickCount = 0;
+        _selectedMeasurement = null;
+        ClearMeasurePreview();
+        btnMeasure.Background = System.Windows.Media.Brushes.Transparent;
+        UpdateStatusBar("Ready");
+    }
+
+    private void ClearMeasurePreview()
+    {
+        foreach (var shape in _measurePreviewShapes)
+            drawingCanvas.Children.Remove(shape);
+        _measurePreviewShapes.Clear();
+    }
+
+    private (Point2D position, string busbarName, int pointIndex)? FindNearestBusbarPointInfo(Point2D position, double maxDistance)
+    {
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return null;
+
+        Point2D? nearest = null;
+        string? nearestName = null;
+        int nearestIndex = -1;
+        double nearestDist = maxDistance;
+
+        foreach (var busbar in currentLayer.Busbars)
+        {
+            for (int i = 0; i <= busbar.Segments.Count; i++)
+            {
+                var point = GetBusbarPoint(busbar, i);
+                double dist = point.DistanceTo(position);
+                if (dist < nearestDist)
+                {
+                    nearestDist = dist;
+                    nearest = point;
+                    nearestName = busbar.Name;
+                    nearestIndex = i;
+                }
+            }
+        }
+
+        if (nearest.HasValue && nearestName != null)
+            return (nearest.Value, nearestName, nearestIndex);
+        return null;
+    }
+
+    private void HandleMeasureClick(MouseButtonEventArgs e)
+    {
+        var clickPos = GetCanvasMousePosition(e);
+
+        if (_measureClickCount == 0)
+        {
+            // Deselect any selected measurement
+            if (_selectedMeasurement != null)
+            {
+                SetMeasurementSelected(_selectedMeasurement, false);
+                _selectedMeasurement = null;
+            }
+
+            // Prioritize busbar point snap over measurement selection
+            var snap = FindNearestBusbarPointInfo(clickPos, 10.0);
+            if (snap != null)
+            {
+                // Start a new measurement
+                _measureBusbar1 = snap.Value.busbarName;
+                _measurePointIndex1 = snap.Value.pointIndex;
+                _measurePoint1 = snap.Value.position;
+                _measureClickCount = 1;
+
+                // Draw snap marker at first point (hit-test invisible so clicks pass through)
+                var marker = new Ellipse
+                {
+                    Width = 8, Height = 8,
+                    Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)),
+                    StrokeThickness = 1.5,
+                    Fill = System.Windows.Media.Brushes.Transparent,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(marker, _measurePoint1.X - 4);
+                Canvas.SetTop(marker, _measurePoint1.Y - 4);
+                drawingCanvas.Children.Add(marker);
+                _measurePreviewShapes.Add(marker);
+
+                UpdateStatusBar("Measure: Click second busbar point");
+            }
+            else
+            {
+                // No busbar point nearby — check if clicking on an existing measurement
+                var hitMeasurement = FindMeasurementAtPoint(clickPos, 5.0);
+                if (hitMeasurement != null)
+                {
+                    // Re-enter placement mode: remove from permanent, set up for repositioning
+                    var activeLayer = _currentProject.GetActiveLayer();
+
+                    // Resolve the two points from the measurement references
+                    var rp1 = ResolveMeasurementPoint(hitMeasurement.BusbarName1, hitMeasurement.PointIndex1);
+                    var rp2 = ResolveMeasurementPoint(hitMeasurement.BusbarName2, hitMeasurement.PointIndex2);
+                    if (rp1 != null && rp2 != null && activeLayer != null)
+                    {
+                        // Store measurement info for repositioning
+                        _measureBusbar1 = hitMeasurement.BusbarName1;
+                        _measurePointIndex1 = hitMeasurement.PointIndex1;
+                        _measureBusbar2 = hitMeasurement.BusbarName2;
+                        _measurePointIndex2 = hitMeasurement.PointIndex2;
+                        _measurePoint1 = rp1.Value;
+                        _measurePoint2 = rp2.Value;
+                        _measurePreviewType = hitMeasurement.Type;
+                        _measurePreviewOffset = hitMeasurement.Offset;
+
+                        // Remove old measurement visuals and data
+                        foreach (var shape in hitMeasurement.VisualShapes)
+                            drawingCanvas.Children.Remove(shape);
+                        hitMeasurement.VisualShapes.Clear();
+                        activeLayer.Measurements.Remove(hitMeasurement);
+
+                        // Clear any leftover preview shapes
+                        ClearMeasurePreview();
+
+                        // Draw point markers
+                        var m1 = new Ellipse
+                        {
+                            Width = 8, Height = 8,
+                            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)),
+                            StrokeThickness = 1.5,
+                            Fill = System.Windows.Media.Brushes.Transparent,
+                            IsHitTestVisible = false
+                        };
+                        Canvas.SetLeft(m1, _measurePoint1.X - 4);
+                        Canvas.SetTop(m1, _measurePoint1.Y - 4);
+                        drawingCanvas.Children.Add(m1);
+                        _measurePreviewShapes.Add(m1);
+
+                        var m2 = new Ellipse
+                        {
+                            Width = 8, Height = 8,
+                            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)),
+                            StrokeThickness = 1.5,
+                            Fill = System.Windows.Media.Brushes.Transparent,
+                            IsHitTestVisible = false
+                        };
+                        Canvas.SetLeft(m2, _measurePoint2.X - 4);
+                        Canvas.SetTop(m2, _measurePoint2.Y - 4);
+                        drawingCanvas.Children.Add(m2);
+                        _measurePreviewShapes.Add(m2);
+
+                        _measureClickCount = 2;
+                        UpdateStatusBar("Measure: Repositioning. Move mouse and click or Enter to confirm.");
+                    }
+                }
+                else
+                {
+                    UpdateStatusBar("Measure: No busbar point found nearby. Click closer to a point.");
+                }
+            }
+            e.Handled = true;
+        }
+        else if (_measureClickCount == 1)
+        {
+            // Click 2: select second point
+            var snap = FindNearestBusbarPointInfo(clickPos, 10.0);
+            if (snap == null)
+            {
+                UpdateStatusBar("Measure: No busbar point found nearby. Click closer to a point.");
+                return;
+            }
+
+            // If same point clicked again, deselect (go back to click 0)
+            if (snap.Value.busbarName == _measureBusbar1 && snap.Value.pointIndex == _measurePointIndex1)
+            {
+                _measureClickCount = 0;
+                ClearMeasurePreview();
+                UpdateStatusBar("Measure: Point deselected. Click a busbar point to start measuring.");
+                e.Handled = true;
+                return;
+            }
+
+            _measureBusbar2 = snap.Value.busbarName;
+            _measurePointIndex2 = snap.Value.pointIndex;
+            _measurePoint2 = snap.Value.position;
+
+            // Clear all preview shapes and redraw both markers
+            ClearMeasurePreview();
+
+            // Redraw marker at first point
+            var marker1 = new Ellipse
+            {
+                Width = 8, Height = 8,
+                Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)),
+                StrokeThickness = 1.5,
+                Fill = System.Windows.Media.Brushes.Transparent,
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(marker1, _measurePoint1.X - 4);
+            Canvas.SetTop(marker1, _measurePoint1.Y - 4);
+            drawingCanvas.Children.Add(marker1);
+            _measurePreviewShapes.Add(marker1);
+
+            // Draw marker at second point
+            var marker2 = new Ellipse
+            {
+                Width = 8, Height = 8,
+                Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)),
+                StrokeThickness = 1.5,
+                Fill = System.Windows.Media.Brushes.Transparent,
+                IsHitTestVisible = false
+            };
+            Canvas.SetLeft(marker2, _measurePoint2.X - 4);
+            Canvas.SetTop(marker2, _measurePoint2.Y - 4);
+            drawingCanvas.Children.Add(marker2);
+            _measurePreviewShapes.Add(marker2);
+
+            _measureClickCount = 2;
+
+            UpdateStatusBar("Measure: Move mouse to position dimension, click or Enter to confirm");
+            e.Handled = true;
+        }
+        else if (_measureClickCount == 2)
+        {
+            // Click 3: confirm placement
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer == null) return;
+
+            var measurement = new Measurement(
+                _measureBusbar1!, _measurePointIndex1,
+                _measureBusbar2!, _measurePointIndex2,
+                _measurePreviewType, _measurePreviewOffset);
+
+            activeLayer.Measurements.Add(measurement);
+
+            // Clear preview and draw permanent
+            ClearMeasurePreview();
+            DrawMeasurement(measurement, _measurePoint1, _measurePoint2);
+
+            _measureClickCount = 0;
+            UpdateStatusBar("Measurement placed. Click to start another, or press ESC to exit.");
+            e.Handled = true;
+        }
+    }
+
+    private void HandleMeasureMouseMove(System.Windows.Input.MouseEventArgs e)
+    {
+        if (_measureClickCount == 1)
+        {
+            // Show snap preview at nearest busbar point
+            var mousePos = GetCanvasMousePosition(e);
+            var snapResult = FindNearestBusbarPointInfo(mousePos, 10.0);
+
+            // Remove old snap preview (keep first point marker)
+            while (_measurePreviewShapes.Count > 1)
+            {
+                var last = _measurePreviewShapes[_measurePreviewShapes.Count - 1];
+                drawingCanvas.Children.Remove(last);
+                _measurePreviewShapes.RemoveAt(_measurePreviewShapes.Count - 1);
+            }
+
+            if (snapResult != null)
+            {
+                var dot = new Ellipse
+                {
+                    Width = 6, Height = 6,
+                    Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)),
+                    StrokeThickness = 1,
+                    Fill = System.Windows.Media.Brushes.Transparent,
+                    IsHitTestVisible = false
+                };
+                Canvas.SetLeft(dot, snapResult.Value.position.X - 3);
+                Canvas.SetTop(dot, snapResult.Value.position.Y - 3);
+                drawingCanvas.Children.Add(dot);
+                _measurePreviewShapes.Add(dot);
+            }
+        }
+        else if (_measureClickCount == 2)
+        {
+            // Live preview of dimension annotation
+            var mousePos = GetCanvasMousePosition(e);
+            DetermineMeasureTypeAndOffset(mousePos, out _measurePreviewType, out _measurePreviewOffset);
+
+            // Remove old preview shapes (keep point markers — first 2 items)
+            while (_measurePreviewShapes.Count > 2)
+            {
+                var last = _measurePreviewShapes[_measurePreviewShapes.Count - 1];
+                drawingCanvas.Children.Remove(last);
+                _measurePreviewShapes.RemoveAt(_measurePreviewShapes.Count - 1);
+            }
+
+            // Draw preview annotation (isPreview=true so shapes don't intercept clicks)
+            DrawMeasurementAnnotation(_measurePoint1, _measurePoint2, _measurePreviewType, _measurePreviewOffset,
+                new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 120, 215)), _measurePreviewShapes, isPreview: true);
+        }
+    }
+
+    private void DetermineMeasureTypeAndOffset(Point2D mousePos, out MeasurementType type, out double offset)
+    {
+        var midX = (_measurePoint1.X + _measurePoint2.X) / 2;
+        var midY = (_measurePoint1.Y + _measurePoint2.Y) / 2;
+
+        double dx = _measurePoint2.X - _measurePoint1.X;
+        double dy = _measurePoint2.Y - _measurePoint1.Y;
+        double directLength = Math.Sqrt(dx * dx + dy * dy);
+
+        // Mouse offset from midpoint
+        double mx = mousePos.X - midX;
+        double my = mousePos.Y - midY;
+
+        if (directLength < 0.01)
+        {
+            // Points are coincident — default to direct
+            type = MeasurementType.Direct;
+            offset = Math.Sqrt(mx * mx + my * my);
+            return;
+        }
+
+        // Perpendicular distance from mouse to the direct line between P1 and P2
+        double directPerp = Math.Abs((-dy * (mousePos.X - _measurePoint1.X) + dx * (mousePos.Y - _measurePoint1.Y)) / directLength);
+
+        // Perpendicular distance from mouse to the horizontal line at midY
+        double horizPerp = Math.Abs(mousePos.Y - midY);
+
+        // Perpendicular distance from mouse to the vertical line at midX
+        double vertPerp = Math.Abs(mousePos.X - midX);
+
+        // The measurement type is the one where mouse is FURTHEST from (i.e. mouse moved away perpendicular to that line)
+        if (directPerp >= horizPerp && directPerp >= vertPerp)
+        {
+            type = MeasurementType.Direct;
+            // Signed offset: positive = left side of direction P1→P2, negative = right
+            offset = (-dy * (mousePos.X - _measurePoint1.X) + dx * (mousePos.Y - _measurePoint1.Y)) / directLength;
+        }
+        else if (horizPerp >= vertPerp)
+        {
+            type = MeasurementType.Horizontal;
+            // Offset = Y distance from midpoint (signed: positive = below in canvas coords)
+            offset = mousePos.Y - midY;
+        }
+        else
+        {
+            type = MeasurementType.Vertical;
+            // Offset = X distance from midpoint (signed: positive = right)
+            offset = mousePos.X - midX;
+        }
+    }
+
+    private void DrawMeasurement(Measurement m, Point2D p1, Point2D p2)
+    {
+        var color = m.IsSelected
+            ? System.Windows.Media.Brushes.DodgerBlue
+            : new SolidColorBrush(System.Windows.Media.Color.FromRgb(105, 105, 105)); // DimGray
+
+        DrawMeasurementAnnotation(p1, p2, m.Type, m.Offset, color, m.VisualShapes);
+    }
+
+    private void DrawMeasurementAnnotation(Point2D p1, Point2D p2, MeasurementType type, double offset,
+        System.Windows.Media.Brush color, List<UIElement> shapes, bool isPreview = false)
+    {
+        double distance;
+        Point2D dimStart, dimEnd; // Endpoints of the dimension line
+        Point2D witness1Start, witness1End; // First witness line (from p1)
+        Point2D witness2Start, witness2End; // Second witness line (from p2)
+
+        const double witnessExtension = 3.0; // How far witness line extends past dimension line
+
+        switch (type)
+        {
+            case MeasurementType.Horizontal:
+            {
+                distance = Math.Abs(p2.X - p1.X);
+                double dimY = (p1.Y + p2.Y) / 2 + offset;
+
+                // Dimension line endpoints (horizontal)
+                dimStart = new Point2D(p1.X, dimY);
+                dimEnd = new Point2D(p2.X, dimY);
+
+                // Witness lines (vertical from each point to dimension line)
+                double ext1 = offset >= 0 ? witnessExtension : -witnessExtension;
+                witness1Start = new Point2D(p1.X, p1.Y);
+                witness1End = new Point2D(p1.X, dimY + ext1);
+                witness2Start = new Point2D(p2.X, p2.Y);
+                witness2End = new Point2D(p2.X, dimY + ext1);
+                break;
+            }
+            case MeasurementType.Vertical:
+            {
+                distance = Math.Abs(p2.Y - p1.Y);
+                double dimX = (p1.X + p2.X) / 2 + offset;
+
+                // Dimension line endpoints (vertical)
+                dimStart = new Point2D(dimX, p1.Y);
+                dimEnd = new Point2D(dimX, p2.Y);
+
+                // Witness lines (horizontal from each point to dimension line)
+                double ext1 = offset >= 0 ? witnessExtension : -witnessExtension;
+                witness1Start = new Point2D(p1.X, p1.Y);
+                witness1End = new Point2D(dimX + ext1, p1.Y);
+                witness2Start = new Point2D(p2.X, p2.Y);
+                witness2End = new Point2D(dimX + ext1, p2.Y);
+                break;
+            }
+            default: // Direct
+            {
+                double dx = p2.X - p1.X;
+                double dy = p2.Y - p1.Y;
+                double len = Math.Sqrt(dx * dx + dy * dy);
+                distance = len;
+
+                if (len < 0.01)
+                {
+                    // Degenerate case
+                    dimStart = p1;
+                    dimEnd = p2;
+                    witness1Start = witness1End = p1;
+                    witness2Start = witness2End = p2;
+                }
+                else
+                {
+                    // Perpendicular unit vector (left of direction P1→P2)
+                    double perpX = -dy / len;
+                    double perpY = dx / len;
+
+                    // Dimension line offset perpendicular to direct line
+                    dimStart = new Point2D(p1.X + perpX * offset, p1.Y + perpY * offset);
+                    dimEnd = new Point2D(p2.X + perpX * offset, p2.Y + perpY * offset);
+
+                    // Witness lines from points to dimension line, extended
+                    double ext = offset >= 0 ? witnessExtension : -witnessExtension;
+                    witness1Start = new Point2D(p1.X, p1.Y);
+                    witness1End = new Point2D(p1.X + perpX * (offset + ext), p1.Y + perpY * (offset + ext));
+                    witness2Start = new Point2D(p2.X, p2.Y);
+                    witness2End = new Point2D(p2.X + perpX * (offset + ext), p2.Y + perpY * (offset + ext));
+                }
+                break;
+            }
+        }
+
+        // Draw witness lines
+        var w1 = new Line
+        {
+            X1 = witness1Start.X, Y1 = witness1Start.Y,
+            X2 = witness1End.X, Y2 = witness1End.Y,
+            Stroke = color, StrokeThickness = 0.3
+        };
+        drawingCanvas.Children.Add(w1);
+        shapes.Add(w1);
+
+        var w2 = new Line
+        {
+            X1 = witness2Start.X, Y1 = witness2Start.Y,
+            X2 = witness2End.X, Y2 = witness2End.Y,
+            Stroke = color, StrokeThickness = 0.3
+        };
+        drawingCanvas.Children.Add(w2);
+        shapes.Add(w2);
+
+        // Draw dimension line
+        var dimLine = new Line
+        {
+            X1 = dimStart.X, Y1 = dimStart.Y,
+            X2 = dimEnd.X, Y2 = dimEnd.Y,
+            Stroke = color, StrokeThickness = 0.5
+        };
+        drawingCanvas.Children.Add(dimLine);
+        shapes.Add(dimLine);
+
+        // Draw tick marks at ends of dimension line (perpendicular to dimension line)
+        double ddx = dimEnd.X - dimStart.X;
+        double ddy = dimEnd.Y - dimStart.Y;
+        double dimLen = Math.Sqrt(ddx * ddx + ddy * ddy);
+        if (dimLen > 0.01)
+        {
+            double tpx = -ddy / dimLen * 2.0; // tick perpendicular, 2mm
+            double tpy = ddx / dimLen * 2.0;
+
+            var tick1 = new Line
+            {
+                X1 = dimStart.X - tpx, Y1 = dimStart.Y - tpy,
+                X2 = dimStart.X + tpx, Y2 = dimStart.Y + tpy,
+                Stroke = color, StrokeThickness = 0.5
+            };
+            drawingCanvas.Children.Add(tick1);
+            shapes.Add(tick1);
+
+            var tick2 = new Line
+            {
+                X1 = dimEnd.X - tpx, Y1 = dimEnd.Y - tpy,
+                X2 = dimEnd.X + tpx, Y2 = dimEnd.Y + tpy,
+                Stroke = color, StrokeThickness = 0.5
+            };
+            drawingCanvas.Children.Add(tick2);
+            shapes.Add(tick2);
+        }
+
+        // Text orientation: readable left-to-right or bottom-to-top, always "underlined" by the dimension line.
+        // Normalize textAngle to [-90°, 90°) — vertical lines get -90° (CCW rotation = bottom-to-top reading).
+        double textAngle = Math.Atan2(ddy, ddx) * 180.0 / Math.PI;
+        while (textAngle >= 90) textAngle -= 180;
+        while (textAngle < -90) textAngle += 180;
+
+        // Text offset: place text so the dimension line acts as an underline.
+        // In WPF canvas (Y-down), the text baseline direction at angle θ is (-sin(θ), cos(θ)).
+        // Offset text away from baseline: (sin(θ), -cos(θ)).
+        // At 0° (horizontal): offset (0, -1) = up, line below = underlined ✓
+        // At -90° (vertical BTU): offset (-1, 0) = left, line to right = underlined ✓
+        double textOffsetDist = _currentProject.MaterialSettings.Thickness * 0.5;
+        double textAngleRad = textAngle * Math.PI / 180.0;
+        double textX = (dimStart.X + dimEnd.X) / 2 + Math.Sin(textAngleRad) * textOffsetDist;
+        double textY = (dimStart.Y + dimEnd.Y) / 2 - Math.Cos(textAngleRad) * textOffsetDist;
+
+        double measureFontSize = _currentProject.MaterialSettings.Thickness * 0.8;
+        var label = new TextBlock
+        {
+            Text = $"{distance:F1}",
+            FontSize = measureFontSize,
+            Foreground = color,
+            RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+            RenderTransform = new RotateTransform(textAngle)
+        };
+
+        // Measure text size for centering
+        label.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        double tw = label.DesiredSize.Width;
+        double th = label.DesiredSize.Height;
+
+        Canvas.SetLeft(label, textX - tw / 2);
+        Canvas.SetTop(label, textY - th / 2);
+        drawingCanvas.Children.Add(label);
+        shapes.Add(label);
+
+        // Preview shapes must not intercept mouse clicks (so click 3 reaches the canvas)
+        if (isPreview)
+        {
+            foreach (var shape in shapes)
+                shape.IsHitTestVisible = false;
+        }
+    }
+
+    private Measurement? FindMeasurementAtPoint(Point2D clickPos, double tolerance)
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return null;
+
+        foreach (var m in activeLayer.Measurements)
+        {
+            // Check if click is near any of the measurement's visual lines
+            foreach (var shape in m.VisualShapes)
+            {
+                if (shape is Line line)
+                {
+                    double dist = DistanceToLineSegment(clickPos,
+                        new Point2D(line.X1, line.Y1), new Point2D(line.X2, line.Y2));
+                    if (dist < tolerance)
+                        return m;
+                }
+                else if (shape is TextBlock tb)
+                {
+                    double left = Canvas.GetLeft(tb);
+                    double top = Canvas.GetTop(tb);
+                    tb.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+                    double w = tb.DesiredSize.Width;
+                    double h = tb.DesiredSize.Height;
+                    if (clickPos.X >= left - tolerance && clickPos.X <= left + w + tolerance &&
+                        clickPos.Y >= top - tolerance && clickPos.Y <= top + h + tolerance)
+                        return m;
+                }
+            }
+        }
+        return null;
+    }
+
+    private double DistanceToLineSegment(Point2D p, Point2D a, Point2D b)
+    {
+        double dx = b.X - a.X;
+        double dy = b.Y - a.Y;
+        double lenSq = dx * dx + dy * dy;
+        if (lenSq < 0.0001) return p.DistanceTo(a);
+
+        double t = ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / lenSq;
+        t = Math.Max(0, Math.Min(1, t));
+        var closest = new Point2D(a.X + t * dx, a.Y + t * dy);
+        return p.DistanceTo(closest);
+    }
+
+    private void SetMeasurementSelected(Measurement m, bool selected)
+    {
+        m.IsSelected = selected;
+        var color = selected
+            ? System.Windows.Media.Brushes.DodgerBlue
+            : new SolidColorBrush(System.Windows.Media.Color.FromRgb(105, 105, 105));
+
+        foreach (var shape in m.VisualShapes)
+        {
+            if (shape is Line line) line.Stroke = color;
+            else if (shape is TextBlock tb) tb.Foreground = color;
+        }
+    }
+
+    private Point2D? ResolveMeasurementPoint(string busbarName, int pointIndex)
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return null;
+
+        var busbar = activeLayer.Busbars.FirstOrDefault(b => b.Name == busbarName);
+        if (busbar == null || pointIndex < 0 || pointIndex > busbar.Segments.Count) return null;
+
+        return GetBusbarPoint(busbar, pointIndex);
+    }
+
+    private void RedrawAllMeasurements()
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return;
+
+        foreach (var m in activeLayer.Measurements)
+        {
+            // Remove old visuals
+            foreach (var shape in m.VisualShapes)
+                drawingCanvas.Children.Remove(shape);
+            m.VisualShapes.Clear();
+
+            // Resolve current point positions
+            var p1 = ResolveMeasurementPoint(m.BusbarName1, m.PointIndex1);
+            var p2 = ResolveMeasurementPoint(m.BusbarName2, m.PointIndex2);
+            if (p1 == null || p2 == null) continue;
+
+            DrawMeasurement(m, p1.Value, p2.Value);
+        }
+    }
+
+    private void ClearAllMeasurementVisuals()
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return;
+
+        foreach (var m in activeLayer.Measurements)
+        {
+            foreach (var shape in m.VisualShapes)
+                drawingCanvas.Children.Remove(shape);
+            m.VisualShapes.Clear();
+        }
+    }
+
+    private void RemoveMeasurementsForBusbar(string busbarName)
+    {
+        var activeLayer = _currentProject.GetActiveLayer();
+        if (activeLayer == null) return;
+
+        var toRemove = activeLayer.Measurements
+            .Where(m => m.BusbarName1 == busbarName || m.BusbarName2 == busbarName)
+            .ToList();
+
+        foreach (var m in toRemove)
+        {
+            foreach (var shape in m.VisualShapes)
+                drawingCanvas.Children.Remove(shape);
+            m.VisualShapes.Clear();
+            activeLayer.Measurements.Remove(m);
+        }
     }
 
     // ===== LINKED BUSBAR MODE =====
