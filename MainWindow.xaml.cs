@@ -183,6 +183,9 @@ public partial class MainWindow : Window
     private string _startPointTypedDistance = "";  // Buffer for typed distance digits
     private double _startPointLastAngle = 0;       // Last preview angle for confirming typed distance
     private Dictionary<StartPoint, Point2D> _originalStartPointPositions = new Dictionary<StartPoint, Point2D>();
+    private StartPoint? _selectedStartPoint = null; // Currently selected startpoint (for deletion)
+    private int _startPointAnchorId = -1; // ID of the anchor startpoint (for creating connections)
+    private List<UIElement> _startPointDistanceLines = new List<UIElement>(); // Distance lines between startpoints
 
     // ===== MEASURE MODE =====
     private bool _isMeasureMode = false;
@@ -6071,7 +6074,21 @@ public partial class MainWindow : Window
         }
         else if (e.Key == Key.Escape && _isStartPointMode)
         {
-            ExitStartPointMode();
+            if (_startPointAnchor != null)
+            {
+                // First Escape: cancel current anchor/preview, stay in tool
+                _startPointAnchor = null;
+                _startPointAnchorId = -1;
+                _startPointAnchorIsBusbarPoint = false;
+                _selectedStartPoint = null;
+                ClearStartPointPreview();
+                UpdateStatusBar("Start Point mode: Click to place points. Type distance for exact spacing. Right-click or ESC to exit.");
+            }
+            else
+            {
+                // Second Escape: exit tool
+                ExitStartPointMode();
+            }
             e.Handled = true;
         }
         else if (e.Key == Key.D && !_isStartPointMode && !_isLinkedBusbarMode)
@@ -6153,6 +6170,25 @@ public partial class MainWindow : Window
                 activeLayer.Measurements.Remove(_selectedMeasurement);
                 _selectedMeasurement = null;
                 UpdateStatusBar("Measurement deleted.");
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Delete && _isStartPointMode && _selectedStartPoint != null)
+        {
+            var activeLayer = _currentProject.GetActiveLayer();
+            if (activeLayer != null)
+            {
+                int deletedId = _selectedStartPoint.Id;
+                activeLayer.StartPoints.Remove(_selectedStartPoint);
+                // Remove all connections involving the deleted startpoint
+                activeLayer.StartPointConnections.RemoveAll(c =>
+                    c.FromId == deletedId || c.ToId == deletedId);
+                _selectedStartPoint = null;
+                _startPointAnchor = null;
+                _startPointAnchorId = -1;
+                RedrawAllStartPointMarkers();
+                DrawStartPointDistanceLines();
+                UpdateStatusBar("Start point deleted.");
             }
             e.Handled = true;
         }
@@ -6707,9 +6743,12 @@ public partial class MainWindow : Window
 
             btnStartPoints.Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(200, 230, 200));
             _startPointAnchor = null;
+            _startPointAnchorId = -1;
             _startPointAnchorIsBusbarPoint = false;
+            _selectedStartPoint = null;
 
             RedrawAllStartPointMarkers();
+            DrawStartPointDistanceLines();
             UpdateStatusBar("Start Point mode: Click to place points. Type distance for exact spacing. Right-click or ESC to exit.");
         }
         else
@@ -6722,13 +6761,26 @@ public partial class MainWindow : Window
     {
         _isStartPointMode = false;
         _startPointAnchor = null;
+        _startPointAnchorId = -1;
         _startPointAnchorIsBusbarPoint = false;
         _startPointTypedDistance = "";
+        _selectedStartPoint = null;
         btnStartPoints.Background = System.Windows.Media.Brushes.Transparent;
 
         ClearStartPointPreview();
         ClearStartPointMarkers();
+        ClearStartPointDistanceLines();
         UpdateStatusBar("Ready");
+    }
+
+    private int NextStartPointId()
+    {
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null || currentLayer.StartPoints.Count == 0) return 1;
+        int maxId = 0;
+        foreach (var sp in currentLayer.StartPoints)
+            if (sp.Id > maxId) maxId = sp.Id;
+        return maxId + 1;
     }
 
     private void HandleStartPointClick(MouseButtonEventArgs e)
@@ -6738,35 +6790,79 @@ public partial class MainWindow : Window
         var currentLayer = _currentProject.GetActiveLayer();
         if (currentLayer == null) return;
 
+        // Try to snap to existing startpoint first, then busbar point
+        StartPoint? nearStartPoint = FindNearestStartPointObject(clickPos, 10.0);
+        Point2D? nearBusbarPoint = FindNearestBusbarPoint(clickPos, 10.0);
+
         if (_startPointAnchor == null)
         {
-            // First click: snap to existing busbar point if nearby for precise positioning
-            Point2D? nearBusbarPoint = FindNearestBusbarPoint(clickPos, 10.0);
-            Point2D pos = nearBusbarPoint ?? clickPos;
-
-            // Always create a start point (even at busbar point locations)
-            // Start points persist independently so they survive busbar deletion
-            var sp = new StartPoint(pos);
-            currentLayer.StartPoints.Add(sp);
-            _startPointAnchor = pos;
-            _startPointAnchorIsBusbarPoint = nearBusbarPoint != null;
-            DrawStartPointMarker(pos);
-            string snapInfo = _startPointAnchorIsBusbarPoint ? " (snapped to busbar point)" : "";
-            UpdateStatusBar($"Start point placed{snapInfo}. Click for next point, or type distance.");
+            // First click: set anchor
+            if (nearStartPoint != null)
+            {
+                // Snap to existing startpoint — use as anchor, don't create duplicate
+                DeselectStartPoint();
+                _selectedStartPoint = nearStartPoint;
+                _startPointAnchor = nearStartPoint.Position;
+                _startPointAnchorId = nearStartPoint.Id;
+                _startPointAnchorIsBusbarPoint = false;
+                RedrawAllStartPointMarkers();
+                DrawStartPointDistanceLines();
+                UpdateStatusBar("Snapped to existing start point. Click for next point, or type distance. DEL to delete.");
+            }
+            else
+            {
+                // Place a new standalone point (no connection yet)
+                Point2D pos = nearBusbarPoint ?? clickPos;
+                int newId = NextStartPointId();
+                var sp = new StartPoint(newId, pos);
+                currentLayer.StartPoints.Add(sp);
+                _startPointAnchor = pos;
+                _startPointAnchorId = newId;
+                _startPointAnchorIsBusbarPoint = nearBusbarPoint != null;
+                DeselectStartPoint();
+                RedrawAllStartPointMarkers();
+                DrawStartPointDistanceLines();
+                string snapInfo = _startPointAnchorIsBusbarPoint ? " (snapped to busbar point)" : "";
+                UpdateStatusBar($"Start point placed{snapInfo}. Click for next point, or type distance.");
+            }
         }
         else
         {
-            // Subsequent click: calculate position with H/V snap
-            Point2D newPos = SnapEndpointHV(_startPointAnchor.Value, clickPos);
+            // Subsequent click: place next point and create connection from anchor
+            Point2D newPos;
+            int newPointId;
+            bool snappedToExisting = false;
+
+            if (nearStartPoint != null)
+            {
+                newPos = nearStartPoint.Position;
+                newPointId = nearStartPoint.Id;
+                snappedToExisting = true;
+            }
+            else
+            {
+                newPos = SnapEndpointHV(_startPointAnchor.Value, clickPos);
+                newPointId = NextStartPointId();
+                var sp = new StartPoint(newPointId, newPos);
+                currentLayer.StartPoints.Add(sp);
+            }
+
+            // Create connection from anchor to new/existing point
+            if (_startPointAnchorId >= 0 && _startPointAnchorId != newPointId)
+            {
+                currentLayer.StartPointConnections.Add(
+                    new StartPointConnection(_startPointAnchorId, newPointId));
+            }
+
             double distance = _startPointAnchor.Value.DistanceTo(newPos);
-
-            var sp = new StartPoint(newPos);
-            currentLayer.StartPoints.Add(sp);
-            DrawStartPointMarker(newPos);
-
             _startPointAnchor = newPos;
+            _startPointAnchorId = newPointId;
             _startPointAnchorIsBusbarPoint = false;
-            UpdateStatusBar($"Start point placed at distance {distance:F1}mm. Click for next, or type distance.");
+            DeselectStartPoint();
+            RedrawAllStartPointMarkers();
+            DrawStartPointDistanceLines();
+            string snapInfo = snappedToExisting ? " (snapped to existing)" : "";
+            UpdateStatusBar($"Start point placed at distance {distance:F1}mm{snapInfo}. Click for next, or type distance.");
         }
     }
 
@@ -6782,9 +6878,10 @@ public partial class MainWindow : Window
         if (_startPointAnchor == null)
         {
             // No anchor yet - just show a green dot following the cursor
-            // Snap to nearby busbar points for visual feedback
+            // Snap to existing startpoints first, then busbar points
+            StartPoint? nearSP = FindNearestStartPointObject(currentPt, 10.0);
             Point2D? nearBusbar = FindNearestBusbarPoint(currentPt, 10.0);
-            Point2D dotPos = nearBusbar ?? currentPt;
+            Point2D dotPos = nearSP != null ? nearSP.Position : (nearBusbar ?? currentPt);
 
             _startPointPreviewDot = new Ellipse
             {
@@ -6801,7 +6898,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        Point2D targetPos = SnapEndpointHV(_startPointAnchor.Value, currentPt);
+        // Snap to existing startpoint first, then use HV snap
+        StartPoint? nearSPTarget = FindNearestStartPointObject(currentPt, 10.0);
+        Point2D targetPos = nearSPTarget != null ? nearSPTarget.Position : SnapEndpointHV(_startPointAnchor.Value, currentPt);
         double distance = _startPointAnchor.Value.DistanceTo(targetPos);
         _startPointLastAngle = Math.Atan2(targetPos.Y - _startPointAnchor.Value.Y, targetPos.X - _startPointAnchor.Value.X);
 
@@ -6906,13 +7005,24 @@ public partial class MainWindow : Window
             _startPointAnchor.Value.Y + distance * Math.Sin(_startPointLastAngle)
         );
 
-        var sp = new StartPoint(newPos);
+        int newId = NextStartPointId();
+        var sp = new StartPoint(newId, newPos);
         currentLayer.StartPoints.Add(sp);
-        DrawStartPointMarker(newPos);
+
+        // Create connection from anchor to new point
+        if (_startPointAnchorId >= 0)
+        {
+            currentLayer.StartPointConnections.Add(
+                new StartPointConnection(_startPointAnchorId, newId));
+        }
 
         _startPointAnchor = newPos;
+        _startPointAnchorId = newId;
         _startPointAnchorIsBusbarPoint = false;
+        DeselectStartPoint();
         ClearStartPointPreview();
+        RedrawAllStartPointMarkers();
+        DrawStartPointDistanceLines();
         UpdateStatusBar($"Start point placed at {distance:F1}mm. Click for next, or type distance.");
     }
 
@@ -6941,15 +7051,18 @@ public partial class MainWindow : Window
         return nearest;
     }
 
-    private void DrawStartPointMarker(Point2D position)
+    private void DrawStartPointMarker(Point2D position, bool isSelected = false)
     {
+        var color = isSelected
+            ? System.Windows.Media.Brushes.DodgerBlue
+            : new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0));
         var marker = new Ellipse
         {
             Width = 6,
             Height = 6,
-            Stroke = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0)),
+            Stroke = color,
             StrokeThickness = 1.5,
-            Fill = System.Windows.Media.Brushes.Transparent
+            Fill = isSelected ? System.Windows.Media.Brushes.DodgerBlue : System.Windows.Media.Brushes.Transparent
         };
         Canvas.SetLeft(marker, position.X - 3);
         Canvas.SetTop(marker, position.Y - 3);
@@ -6965,7 +7078,7 @@ public partial class MainWindow : Window
 
         foreach (var sp in currentLayer.StartPoints)
         {
-            DrawStartPointMarker(sp.Position);
+            DrawStartPointMarker(sp.Position, sp == _selectedStartPoint);
         }
     }
 
@@ -7016,6 +7129,123 @@ public partial class MainWindow : Window
         }
 
         return nearest;
+    }
+
+    private StartPoint? FindNearestStartPointObject(Point2D position, double maxDistance)
+    {
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return null;
+
+        StartPoint? nearest = null;
+        double nearestDist = maxDistance;
+
+        foreach (var sp in currentLayer.StartPoints)
+        {
+            double dist = sp.Position.DistanceTo(position);
+            if (dist < nearestDist)
+            {
+                nearestDist = dist;
+                nearest = sp;
+            }
+        }
+
+        return nearest;
+    }
+
+    private void DeselectStartPoint()
+    {
+        _selectedStartPoint = null;
+        RedrawAllStartPointMarkers();
+    }
+
+    private StartPoint? FindStartPointById(int id)
+    {
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return null;
+        foreach (var sp in currentLayer.StartPoints)
+            if (sp.Id == id) return sp;
+        return null;
+    }
+
+    private void DrawStartPointDistanceLines()
+    {
+        ClearStartPointDistanceLines();
+        var currentLayer = _currentProject.GetActiveLayer();
+        if (currentLayer == null) return;
+
+        if (currentLayer.StartPointConnections.Count == 0) return;
+
+        var green = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0, 180, 0));
+        double thickness = _currentProject.MaterialSettings.Thickness;
+
+        // Draw distance line for each explicit connection
+        foreach (var conn in currentLayer.StartPointConnections)
+        {
+            var sp1 = FindStartPointById(conn.FromId);
+            var sp2 = FindStartPointById(conn.ToId);
+            if (sp1 == null || sp2 == null) continue;
+
+            var p1 = sp1.Position;
+            var p2 = sp2.Position;
+            double dist = p1.DistanceTo(p2);
+
+            // Dashed line between points
+            var line = new Line
+            {
+                X1 = p1.X, Y1 = p1.Y,
+                X2 = p2.X, Y2 = p2.Y,
+                Stroke = green,
+                StrokeThickness = 0.3,
+                StrokeDashArray = new DoubleCollection { 4, 2 },
+                IsHitTestVisible = false
+            };
+            drawingCanvas.Children.Add(line);
+            _startPointDistanceLines.Add(line);
+
+            // Distance label at midpoint
+            double midX = (p1.X + p2.X) / 2;
+            double midY = (p1.Y + p2.Y) / 2;
+
+            // Text angle — same logic as measure tool: readable L-to-R or bottom-to-top
+            double ddx = p2.X - p1.X;
+            double ddy = p2.Y - p1.Y;
+            double textAngle = Math.Atan2(ddy, ddx) * 180.0 / Math.PI;
+            while (textAngle >= 90) textAngle -= 180;
+            while (textAngle < -90) textAngle += 180;
+
+            // Offset text so it sits beside the line (underlined)
+            double textAngleRad = textAngle * Math.PI / 180.0;
+            double textOffsetDist = thickness * 0.5;
+            double textX = midX + Math.Sin(textAngleRad) * textOffsetDist;
+            double textY = midY - Math.Cos(textAngleRad) * textOffsetDist;
+
+            double fontSize = thickness * 0.8;
+            var label = new TextBlock
+            {
+                Text = $"{dist:F1}",
+                FontSize = fontSize,
+                Foreground = green,
+                RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+                RenderTransform = new RotateTransform(textAngle),
+                IsHitTestVisible = false
+            };
+            label.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+            double tw = label.DesiredSize.Width;
+            double th = label.DesiredSize.Height;
+            Canvas.SetLeft(label, textX - tw / 2);
+            Canvas.SetTop(label, textY - th / 2);
+            drawingCanvas.Children.Add(label);
+            _startPointDistanceLines.Add(label);
+        }
+    }
+
+    private void ClearStartPointDistanceLines()
+    {
+        foreach (var element in _startPointDistanceLines)
+        {
+            drawingCanvas.Children.Remove(element);
+        }
+        _startPointDistanceLines.Clear();
     }
 
     // ===== MEASURE MODE =====

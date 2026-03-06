@@ -12,6 +12,7 @@ namespace BusbarCAD.Models
         public bool Visible { get; set; }
         public List<Busbar> Busbars { get; set; }
         public List<StartPoint> StartPoints { get; set; }
+        public List<StartPointConnection> StartPointConnections { get; set; }
         public List<Measurement> Measurements { get; set; }
 
         public Layer() { } // Parameterless constructor for JSON deserialization
@@ -24,6 +25,7 @@ namespace BusbarCAD.Models
             Visible = true;
             Busbars = new List<Busbar>();
             StartPoints = new List<StartPoint>();
+            StartPointConnections = new List<StartPointConnection>();
             Measurements = new List<Measurement>();
         }
 
